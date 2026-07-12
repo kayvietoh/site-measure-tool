@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#1b2430">
+<title>工地测量工具 Site Measure Tool</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <img src="logo-SRMSB-small.jpg" alt="SRMSB logo" class="brand-logo">
+  <h1><span data-i18n="app.title">工地测量工具</span></h1>
+  <button class="menu-btn" id="btn-menu" aria-label="Menu">⋮</button>
+</header>
+
+<!-- ============ 更多菜单 More menu ============ -->
+<div class="sheet-overlay" id="menu-overlay" hidden>
+  <div class="sheet-card">
+    <button class="sheet-item" id="menu-about">ℹ️ <span data-i18n="menu.about">关于我们 About us</span></button>
+    <button class="sheet-item" id="menu-settings">⚙️ <span data-i18n="menu.settings">设置 Settings</span></button>
+    <button class="sheet-item sheet-cancel" id="menu-cancel" data-i18n="menu.cancel">取消 Cancel</button>
+  </div>
+</div>
+
+<!-- ============ About us 弹窗 ============ -->
+<div class="modal-overlay" id="about-overlay" hidden>
+  <div class="modal-card">
+    <button class="modal-close" id="about-close">✕</button>
+    <img src="logo-SRMSB-small.jpg" alt="SRMSB logo" class="about-logo">
+    <h2>Sunny Rainbow (M) Sdn Bhd</h2>
+    <p class="hint">Sunny Rainbow Construction / Sunny Rainbow (M) Sdn Bhd is a Selangor-based contractor registered with the Construction Industry Development Board (CIDB) of Malaysia. Operating under various related entities, the company specializes in building, civil engineering, and general contracting services, including home renovations, roofing, and mechanical &amp; electrical (M&amp;E) solutions.</p>
+    <p class="hint">Sunny Rainbow Construction / Sunny Rainbow (M) Sdn Bhd 是一家总部位于雪兰莪州的建筑承包商，已在马来西亚建筑业发展局 (CIDB) 注册。该公司通过多家关联实体运营，专门从事建筑、土木工程和总承包服务，包括房屋翻新、屋顶工程以及机电 (M&amp;E) 解决方案。</p>
+    <div class="about-contact">
+      <a href="tel:0122313459">📞 012-231 3459</a>
+      <a href="mailto:sunnyrainbow72g@gmail.com">✉️ sunnyrainbow72g@gmail.com</a>
+      <p>📍 72, Jalan Damar, Glenmarie Cove, 42000 Pelabuhan Klang, Selangor</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 设置 Settings 弹窗 ============ -->
+<div class="modal-overlay" id="settings-overlay" hidden>
+  <div class="modal-card">
+    <button class="modal-close" id="settings-close">✕</button>
+    <h2 data-i18n="settings.title">设置 Settings</h2>
+
+    <div class="field-row">
+      <label data-i18n="settings.language">语言 Language</label>
+      <select id="set-language" class="settings-select">
+        <option value="zh">中文 Chinese</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+
+    <div class="field-row">
+      <label>默认相机高度 <span class="en">Default camera height (m)</span></label>
+      <input type="number" inputmode="decimal" id="set-default-height" placeholder="例如 1.5">
+    </div>
+
+    <div class="field-row">
+      <label>默认显示单位 <span class="en">Default display unit</span></label>
+      <select id="set-default-unit" class="settings-select">
+        <option value="m">米 meter (m)</option>
+        <option value="ft">英尺 feet (ft)</option>
+      </select>
+    </div>
+
+    <div class="field-row" style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" id="set-light-theme" style="width:auto;">
+      <label for="set-light-theme" style="margin:0;" data-i18n="settings.lightTheme">浅色主题 Light theme</label>
+    </div>
+
+    <div class="field-row" style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" id="set-level-vibrate" style="width:auto;" checked>
+      <label for="set-level-vibrate" style="margin:0;" data-i18n="settings.levelVibrate">水平仪震动提示 Level vibration</label>
+    </div>
+
+    <button class="btn-secondary" id="btn-clear-data" data-i18n="settings.clearData">🗑️ 清除所有数据 Clear all data</button>
+  </div>
+</div>
+
+<main id="app">
+
+  <!-- ============ TAB 1: 单位换算 ============ -->
+  <section class="tab-page" id="tab-units" data-tab="units">
+    <div class="card">
+      <h2>长度 <span class="en">Length (meter ⇄ ft)</span></h2>
+      <div class="field-row">
+        <label>米 <span class="en">meter (m)</span></label>
+        <input type="number" inputmode="decimal" id="len-m" placeholder="0">
+      </div>
+      <div class="field-row">
+        <label>英尺 <span class="en">feet (ft)</span></label>
+        <input type="number" inputmode="decimal" id="len-ft" placeholder="0">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>面积 <span class="en">Area (sqm ⇄ sqft)</span></h2>
+      <div class="field-row">
+        <label>平方米 <span class="en">square meter (sqm)</span></label>
+        <input type="number" inputmode="decimal" id="area-sqm" placeholder="0">
+      </div>
+      <div class="field-row">
+        <label>平方英尺 <span class="en">square feet (sqft)</span></label>
+        <input type="number" inputmode="decimal" id="area-sqft" placeholder="0">
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TAB 2: 拍照测距 ============ -->
+  <section class="tab-page" id="tab-distance" data-tab="distance" hidden>
+
+    <div class="mode-switch">
+      <button class="mode-btn active" data-mode="angle">角度+高度法<br><span class="en">Angle + Height</span></button>
+      <button class="mode-btn" data-mode="ref">参考物校正法<br><span class="en">Reference Object</span></button>
+    </div>
+
+    <!-- Mode A: angle + height -->
+    <div class="mode-panel active" id="mode-angle">
+      <div class="card">
+        <div class="field-row">
+          <label>相机/眼睛离地高度 <span class="en">camera height (m)</span></label>
+          <input type="number" inputmode="decimal" id="cam-height" placeholder="例如 1.5">
+        </div>
+        <button class="btn-secondary" id="btn-calibrate">📐 校准水平线 Calibrate Level</button>
+        <p class="hint" id="calibrate-hint">先把手机竖直对准地平线，然后点击校准。</p>
+      </div>
+
+      <div class="camera-wrap" id="camwrap-angle">
+        <video id="video-angle" autoplay playsinline muted></video>
+        <div class="overlay-crosshair"></div>
+        <div class="overlay-readout" id="angle-readout">俯仰角 tilt: --°</div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-start-cam-angle">📷 开启相机 Start Camera</button>
+        <button class="btn-primary" id="btn-lock-a" disabled>锁定点 A</button>
+        <button class="btn-primary" id="btn-lock-b" disabled>锁定点 B</button>
+      </div>
+
+      <div class="card result-card" id="result-angle">
+        <div class="result-row"><span>点 A 距离 Dist A</span><b id="res-da">--</b></div>
+        <div class="result-row"><span>点 B 距离 Dist B</span><b id="res-db">--</b></div>
+        <div class="result-row highlight"><span>A ⇄ B 估计距离</span><b id="res-ab">--</b></div>
+        <button class="btn-secondary" id="btn-reset-angle">重置 Reset</button>
+      </div>
+    </div>
+
+    <!-- Mode B: reference object -->
+    <div class="mode-panel" id="mode-ref">
+      <div class="card">
+        <div class="field-row">
+          <label>参考物实际长度 <span class="en">reference length (cm)</span></label>
+          <input type="number" inputmode="decimal" id="ref-length" placeholder="例如 29.7 (A4纸长边)">
+        </div>
+      </div>
+
+      <div class="camera-wrap" id="camwrap-ref">
+        <video id="video-ref" autoplay playsinline muted></video>
+        <canvas id="canvas-ref"></canvas>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-start-cam-ref">📷 开启相机 Start Camera</button>
+        <button class="btn-primary" id="btn-snap-ref">📸 拍照 Capture</button>
+      </div>
+
+      <p class="hint" id="ref-hint">拍照后：先点参考物两端 (2点)，再点要测量的两端 (2点)。参考物与目标须在同一平面、大致同一拍摄距离，结果仅供估算。</p>
+
+      <div class="btn-row">
+        <button class="btn-secondary" id="btn-undo-ref">撤销 Undo</button>
+        <button class="btn-secondary" id="btn-reset-ref">重置 Reset</button>
+      </div>
+
+      <div class="card result-card">
+        <div class="result-row"><span>参考物像素长度</span><b id="res-ref-px">--</b></div>
+        <div class="result-row highlight"><span>目标估计长度</span><b id="res-ref-dist">--</b></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ TAB 3: 水平仪 ============ -->
+  <section class="tab-page" id="tab-level" data-tab="level" hidden>
+    <div class="camera-wrap" id="camwrap-level">
+      <video id="video-level" autoplay playsinline muted></video>
+      <svg id="level-lines" class="overlay-svg" viewBox="0 0 300 400">
+        <line id="line-h-fixed" x1="0" y1="200" x2="300" y2="200" class="line-fixed" />
+        <line id="line-v-fixed" x1="150" y1="0" x2="150" y2="400" class="line-fixed" />
+        <line id="line-h" x1="0" y1="200" x2="300" y2="200" class="line-moving" />
+        <line id="line-v" x1="150" y1="0" x2="150" y2="400" class="line-moving" />
+      </svg>
+      <div class="overlay-readout" id="level-readout">左右 roll: --° &nbsp;|&nbsp; 前后 pitch: --°</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" id="btn-start-cam-level">📷 开启相机 Start Camera</button>
+      <button class="btn-secondary" id="btn-enable-motion">🧭 允许方向感应 Enable Sensors</button>
+    </div>
+  </section>
+
+  <!-- ============ TAB 4: 三角计算 ============ -->
+  <section class="tab-page" id="tab-triangle" data-tab="triangle" hidden>
+    <div class="mode-switch">
+      <button class="mode-btn active" data-tmode="wh">宽+高 → 角度<br><span class="en">Width+Height → Angle</span></button>
+      <button class="mode-btn" data-tmode="wa">宽+角度 → 高<br><span class="en">Width+Angle → Height</span></button>
+    </div>
+
+    <p class="hint">假设为直角三角形（其中一边永远是 90°）。拖动数字即可即时看到三角形变化。</p>
+
+    <div class="tri-canvas-wrap" id="tri-canvas-wrap">
+      <svg id="tri-svg" viewBox="0 0 320 320">
+        <polygon id="tri-shape" points="" />
+        <path id="tri-right-angle-mark" d="" />
+        <path id="tri-arc" d="" />
+        <text id="tri-label-angle" class="tri-svg-text"></text>
+        <text id="tri-label-slope" class="tri-svg-text"></text>
+      </svg>
+
+      <div class="tri-input tri-input-height" id="tri-input-height-wrap">
+        <label>墙高 <span class="en">height (m)</span></label>
+        <input type="number" inputmode="decimal" id="tri-height" placeholder="4">
+      </div>
+
+      <div class="tri-input tri-input-angle" id="tri-input-angle-wrap" hidden>
+        <label>夹角 <span class="en">angle (°)</span></label>
+        <input type="number" inputmode="decimal" id="tri-angle" placeholder="53">
+      </div>
+
+      <div class="tri-input tri-input-width">
+        <label>宽度 <span class="en">width (m)</span></label>
+        <input type="number" inputmode="decimal" id="tri-width" placeholder="3">
+      </div>
+    </div>
+
+    <div class="card result-card">
+      <div class="result-row tri-wh-only"><span>地面夹角 Angle</span><b id="tri-res-angle">--</b></div>
+      <div class="result-row tri-wa-only" hidden><span>墙高 Wall height</span><b id="tri-res-height">--</b></div>
+      <div class="result-row highlight"><span>斜边距离 Slope distance</span><b id="tri-res-slope">--</b></div>
+    </div>
+  </section>
+
+  <!-- ============ TAB 5: 房间测绘 ============ -->
+  <section class="tab-page" id="tab-room" data-tab="room" hidden>
+    <div class="card">
+      <div class="field-row">
+        <label>相机/眼睛离地高度 <span class="en">camera height (m)</span></label>
+        <input type="number" inputmode="decimal" id="room-height" placeholder="例如 1.5">
+      </div>
+      <button class="btn-secondary" id="btn-room-calibrate">📐 校准水平线 Calibrate Level</button>
+      <p class="hint" id="room-calibrate-hint">站在房间内固定不动的一点，保持原地不移动，把手机竖直对准地平线后点击校准，然后转身逐一瞄准各个角落。</p>
+    </div>
+
+    <div class="camera-wrap" id="camwrap-room">
+      <video id="video-room" autoplay playsinline muted></video>
+      <div class="overlay-crosshair"></div>
+      <div class="overlay-readout" id="room-angle-readout">俯仰角 tilt: --°</div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn-primary" id="btn-start-cam-room">📷 开启相机 Start Camera</button>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn-primary" id="btn-add-floor">➕ 地板角 Floor corner</button>
+      <button class="btn-secondary" id="btn-new-obstacle">🧱 新障碍物 New obstacle</button>
+      <button class="btn-primary" id="btn-add-obstacle-corner">➕ 障碍物角 Obstacle corner</button>
+    </div>
+
+    <div class="card" id="room-height-target-card" hidden>
+      <p class="hint">已选定 <b id="room-height-target-label"></b> — 请把手机对准该角落的顶部（天花板/顶端），然后确认。</p>
+      <button class="btn-primary" id="btn-confirm-height">✅ 确认顶部角度 Confirm top angle</button>
+    </div>
+
+    <div class="card">
+      <h2>已记录的点 <span class="en">Captured points</span></h2>
+      <div id="room-points-list" class="room-points-list"><p class="hint">尚未记录任何点。</p></div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn-secondary" id="btn-undo-room">撤销 Undo</button>
+      <button class="btn-secondary" id="btn-reset-room">重置 Reset</button>
+    </div>
+
+    <div class="card">
+      <div class="field-row" style="display:flex; align-items:center; gap:8px; margin-bottom:0;">
+        <input type="checkbox" id="chk-hide-obstacles" style="width:auto;">
+        <label for="chk-hide-obstacles" style="margin:0;">隐藏障碍物 <span class="en">Hide obstacles</span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>平面图闭合 <span class="en">Polygon closure</span></h2>
+      <p class="hint">此功能假设你是按绕行房间一圈的顺序依次记录角点（角1 → 角2 → ... → 回到角1）。走完一圈回到起点时，若怀疑有误差，可重新瞄准角1拍一次"闭合点"，系统会算出误差并可选择自动分摊调整。绿色粗体 = 与实测一致；棕色 = 该边已被调整，建议重新measure或手动编辑。</p>
+      <button class="btn-secondary" id="btn-capture-closure">🔁 重新瞄准角1 (闭合点) Re-sight point 1</button>
+      <div id="room-closure-pending" hidden>
+        <div class="result-row highlight"><span>闭合误差 Closure error</span><b id="room-res-closure">--</b></div>
+        <div class="btn-row">
+          <button class="btn-primary" id="btn-apply-closure">✅ 应用调整 Apply</button>
+          <button class="btn-secondary" id="btn-discard-closure">✕ 取消 Discard</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>平面图 <span class="en">Floor plan (top-down)</span></h2>
+      <p class="hint">点击任一边线可用实际卷尺量出的数值校正整体比例。</p>
+      <svg id="room-plan-svg" class="room-plan-svg" viewBox="0 0 320 320"></svg>
+      <div class="result-row highlight" style="margin-top:10px;"><span>地板面积 Floor area</span><b id="room-res-area">--</b></div>
+      <div class="result-row"><span>地板周长 Perimeter</span><b id="room-res-perimeter">--</b></div>
+    </div>
+
+    <div class="card">
+      <h2>各墙壁 <span class="en">Walls</span></h2>
+      <p class="hint">天花宽度默认与地面宽度相同；若天花实际较窄/较宽（斜墙），可点击修改覆盖。</p>
+      <div id="room-walls-list" class="room-points-list"><p class="hint">至少需要 2 个地板角点。</p></div>
+    </div>
+
+    <div class="card">
+      <h2>备注 <span class="en">Remarks</span></h2>
+      <textarea id="room-remarks" class="room-remarks" rows="4" placeholder="例如：客厅，天花板有横梁，靠窗墙面需要额外防水处理..."></textarea>
+    </div>
+
+    <div class="card">
+      <h2>导出报告 <span class="en">Export report</span></h2>
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-export-jpg">🖼️ 导出 JPG</button>
+        <button class="btn-primary" id="btn-export-pdf">📄 导出 PDF</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<nav class="tabbar">
+  <button class="tab-btn active" data-target="units">📏<br><span data-i18n="tab.units">单位换算</span></button>
+  <button class="tab-btn" data-target="distance">📷<br><span data-i18n="tab.distance">拍照测距</span></button>
+  <button class="tab-btn" data-target="level">🧭<br><span data-i18n="tab.level">水平仪</span></button>
+  <button class="tab-btn" data-target="triangle">📐<br><span data-i18n="tab.triangle">三角计算</span></button>
+  <button class="tab-btn" data-target="room">🏠<br><span data-i18n="tab.room">房间测绘</span></button>
+</nav>
+
+<script src="app.js"></script>
+</body>
+</html>

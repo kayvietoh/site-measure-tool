@@ -45,6 +45,15 @@
   </div>
 </div>
 
+<!-- ============ 校准 Calibrate 弹窗 (拍照测距 / 房间测绘 共用) ============ -->
+<div class="modal-overlay" id="calibrate-overlay" hidden>
+  <div class="modal-card">
+    <h2>📐 校准水平 <span class="en">Calibrate Level</span></h2>
+    <p class="hint">请将手机竖直握持并保持水平（对准地平线），然后点击下方按钮开始测量。<br><span class="en">Hold the phone upright and level (aimed at the horizon), then tap below to start measuring.</span></p>
+    <button class="btn-primary" id="btn-do-calibrate">✅ 校准并开始 Calibrate &amp; Start</button>
+  </div>
+</div>
+
 <!-- ============ 设置 Settings 弹窗 ============ -->
 <div class="modal-overlay" id="settings-overlay" hidden>
   <div class="modal-card">
@@ -125,31 +134,19 @@
 
     <!-- Mode A: angle + height -->
     <div class="mode-panel active" id="mode-angle">
-      <div class="card">
-        <div class="field-row">
-          <label>相机/眼睛离地高度 <span class="en">camera height (m)</span></label>
-          <input type="number" inputmode="decimal" id="cam-height" placeholder="例如 1.5">
-        </div>
-        <button class="btn-secondary" id="btn-calibrate">📐 校准水平线 Calibrate Level</button>
-        <p class="hint" id="calibrate-hint">先把手机竖直对准地平线，然后点击校准。</p>
-      </div>
-
       <div class="camera-wrap" id="camwrap-angle">
         <video id="video-angle" autoplay playsinline muted></video>
         <div class="overlay-crosshair"></div>
         <div class="overlay-readout" id="angle-readout">俯仰角 tilt: --°</div>
-      </div>
-
-      <div class="btn-row">
-        <button class="btn-primary" id="btn-start-cam-angle">📷 开启相机 Start Camera</button>
-        <button class="btn-primary" id="btn-lock-a" disabled>锁定点 A</button>
-        <button class="btn-primary" id="btn-lock-b" disabled>锁定点 B</button>
+        <div class="overlay-readout overlay-readout-height" id="angle-height-readout">相机高度 Height: --</div>
+        <svg class="ar-overlay" id="ar-svg-angle" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+        <button class="fab-undo" id="btn-undo-angle" title="撤销 Undo">↺</button>
+        <button class="fab-capture" id="btn-capture-angle" title="添加点 Add point">✛</button>
       </div>
 
       <div class="card result-card" id="result-angle">
-        <div class="result-row"><span>点 A 距离 Dist A</span><b id="res-da">--</b></div>
-        <div class="result-row"><span>点 B 距离 Dist B</span><b id="res-db">--</b></div>
-        <div class="result-row highlight"><span>A ⇄ B 估计距离</span><b id="res-ab">--</b></div>
+        <div id="angle-segments-list" class="room-points-list"><p class="hint">点击上方 ✛ 按钮开始添加点 A、B、C... <span class="en">Tap the ✛ button above to add points A, B, C...</span></p></div>
+        <div class="result-row highlight"><span>总距离 Total Distance</span><b id="res-total">--</b></div>
         <button class="btn-secondary" id="btn-reset-angle">重置 Reset</button>
       </div>
     </div>
@@ -201,7 +198,7 @@
     </div>
     <div class="btn-row">
       <button class="btn-primary" id="btn-start-cam-level">📷 开启相机 Start Camera</button>
-      <button class="btn-secondary" id="btn-enable-motion">🧭 允许方向感应 Enable Sensors</button>
+      <button class="btn-secondary" id="btn-snap-level">📸 截图 Screenshot</button>
     </div>
   </section>
 
@@ -248,29 +245,14 @@
 
   <!-- ============ TAB 5: 房间测绘 ============ -->
   <section class="tab-page" id="tab-room" data-tab="room" hidden>
-    <div class="card">
-      <div class="field-row">
-        <label>相机/眼睛离地高度 <span class="en">camera height (m)</span></label>
-        <input type="number" inputmode="decimal" id="room-height" placeholder="例如 1.5">
-      </div>
-      <button class="btn-secondary" id="btn-room-calibrate">📐 校准水平线 Calibrate Level</button>
-      <p class="hint" id="room-calibrate-hint">站在房间内固定不动的一点，保持原地不移动，把手机竖直对准地平线后点击校准，然后转身逐一瞄准各个角落。</p>
-    </div>
-
     <div class="camera-wrap" id="camwrap-room">
       <video id="video-room" autoplay playsinline muted></video>
       <div class="overlay-crosshair"></div>
       <div class="overlay-readout" id="room-angle-readout">俯仰角 tilt: --°</div>
-    </div>
-
-    <div class="btn-row">
-      <button class="btn-primary" id="btn-start-cam-room">📷 开启相机 Start Camera</button>
-    </div>
-
-    <div class="btn-row">
-      <button class="btn-primary" id="btn-add-floor">➕ 地板角 Floor corner</button>
-      <button class="btn-secondary" id="btn-new-obstacle">🧱 新障碍物 New obstacle</button>
-      <button class="btn-primary" id="btn-add-obstacle-corner">➕ 障碍物角 Obstacle corner</button>
+      <div class="overlay-readout overlay-readout-height" id="room-height-readout">相机高度 Height: --</div>
+      <svg class="ar-overlay" id="ar-svg-room" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+      <button class="fab-undo" id="btn-undo-room" title="撤销 Undo">↺</button>
+      <button class="fab-capture" id="btn-capture-room" title="添加地板角 Add corner">✛</button>
     </div>
 
     <div class="card" id="room-height-target-card" hidden>
@@ -284,42 +266,19 @@
     </div>
 
     <div class="btn-row">
-      <button class="btn-secondary" id="btn-undo-room">撤销 Undo</button>
       <button class="btn-secondary" id="btn-reset-room">重置 Reset</button>
     </div>
 
     <div class="card">
-      <div class="field-row" style="display:flex; align-items:center; gap:8px; margin-bottom:0;">
-        <input type="checkbox" id="chk-hide-obstacles" style="width:auto;">
-        <label for="chk-hide-obstacles" style="margin:0;">隐藏障碍物 <span class="en">Hide obstacles</span></label>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>平面图闭合 <span class="en">Polygon closure</span></h2>
-      <p class="hint">此功能假设你是按绕行房间一圈的顺序依次记录角点（角1 → 角2 → ... → 回到角1）。走完一圈回到起点时，若怀疑有误差，可重新瞄准角1拍一次"闭合点"，系统会算出误差并可选择自动分摊调整。绿色粗体 = 与实测一致；棕色 = 该边已被调整，建议重新measure或手动编辑。</p>
-      <button class="btn-secondary" id="btn-capture-closure">🔁 重新瞄准角1 (闭合点) Re-sight point 1</button>
-      <div id="room-closure-pending" hidden>
-        <div class="result-row highlight"><span>闭合误差 Closure error</span><b id="room-res-closure">--</b></div>
-        <div class="btn-row">
-          <button class="btn-primary" id="btn-apply-closure">✅ 应用调整 Apply</button>
-          <button class="btn-secondary" id="btn-discard-closure">✕ 取消 Discard</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>平面图 <span class="en">Floor plan (top-down)</span></h2>
+      <h2>平面图 <span class="en">Floor plan (3D wireframe)</span></h2>
       <p class="hint">点击任一边线可用实际卷尺量出的数值校正整体比例。</p>
       <svg id="room-plan-svg" class="room-plan-svg" viewBox="0 0 320 320"></svg>
-      <div class="result-row highlight" style="margin-top:10px;"><span>地板面积 Floor area</span><b id="room-res-area">--</b></div>
-      <div class="result-row"><span>地板周长 Perimeter</span><b id="room-res-perimeter">--</b></div>
-    </div>
-
-    <div class="card">
-      <h2>各墙壁 <span class="en">Walls</span></h2>
-      <p class="hint">天花宽度默认与地面宽度相同；若天花实际较窄/较宽（斜墙），可点击修改覆盖。</p>
-      <div id="room-walls-list" class="room-points-list"><p class="hint">至少需要 2 个地板角点。</p></div>
+      <div class="plan-pager">
+        <button class="plan-pager-btn" id="btn-plan-prev">‹</button>
+        <div class="plan-pager-label" id="plan-pager-label">地板 Floor</div>
+        <button class="plan-pager-btn" id="btn-plan-next">›</button>
+      </div>
+      <div id="plan-page-content"></div>
     </div>
 
     <div class="card">

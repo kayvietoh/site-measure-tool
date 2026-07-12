@@ -37,7 +37,7 @@ const I18N = {
 
 let appSettings = {
   language: 'zh',
-  defaultCamHeight: null,
+  defaultCamHeight: 1.2,
   defaultUnit: 'm',
   lightTheme: false,
   levelVibrate: true
@@ -83,10 +83,12 @@ function applyTheme(light) {
 
 function prefillDefaultCamHeights() {
   if (!appSettings.defaultCamHeight) return;
-  const camHeightEl = document.getElementById('cam-height');
   const roomHeightEl = document.getElementById('room-height');
-  if (camHeightEl && !camHeightEl.value) camHeightEl.value = appSettings.defaultCamHeight;
   if (roomHeightEl && !roomHeightEl.value) roomHeightEl.value = appSettings.defaultCamHeight;
+  const heightReadoutEl = document.getElementById('angle-height-readout');
+  if (heightReadoutEl) {
+    heightReadoutEl.textContent = '相机高度 Height: ' + fmt(appSettings.defaultCamHeight, 2) + 'm';
+  }
 }
 
 // Formats a value already in meters/sqm as the user's preferred primary unit,
@@ -109,7 +111,7 @@ function fmtArea(sqm, digits) {
 }
 
 function refreshUnitDependentDisplays() {
-  if (typeof computeAB === 'function') computeAB();
+  if (typeof renderAngleSegmentsList === 'function') renderAngleSegmentsList();
   if (typeof renderTriangle === 'function') renderTriangle();
   if (typeof updateRoomSummary === 'function') updateRoomSummary();
   if (typeof refPoints !== 'undefined' && refPoints.length === 4 && typeof evaluateRefPoints === 'function') evaluateRefPoints();
@@ -185,6 +187,12 @@ tabButtons.forEach(btn => {
     tabButtons.forEach(b => b.classList.toggle('active', b === btn));
     tabPages.forEach(p => p.hidden = (p.dataset.tab !== target));
     stopCamerasExcept(target);
+    if (target === 'distance' && document.querySelector('.mode-btn[data-mode="angle"]').classList.contains('active')) {
+      initAngleMode();
+    }
+    if (target === 'room' && typeof initRoomMode === 'function') {
+      initRoomMode();
+    }
   });
 });
 
@@ -259,6 +267,7 @@ function stopCamerasExcept(keepTab) {
 let currentBeta = null;   // 前后倾斜 front-back tilt
 let currentGamma = null;  // 左右滚动 roll
 let currentAlpha = null;  // 罗盘 compass (relative is fine)
+let currentAccel = null;  // {x,y,z} accelerationIncludingGravity, for gimbal-lock-free level readings
 let motionEnabled = false;
 
 async function ensureMotionPermission() {
@@ -272,7 +281,16 @@ async function ensureMotionPermission() {
         return false;
       }
     }
+    if (typeof DeviceMotionEvent !== 'undefined' &&
+        typeof DeviceMotionEvent.requestPermission === 'function') {
+      const resM = await DeviceMotionEvent.requestPermission();
+      if (resM !== 'granted') {
+        alert('需要运动感应权限才能使用水平仪 Motion permission denied');
+        return false;
+      }
+    }
     window.addEventListener('deviceorientation', onOrientation);
+    window.addEventListener('devicemotion', onDeviceMotion);
     motionEnabled = true;
     return true;
   } catch (err) {
@@ -287,8 +305,48 @@ function onOrientation(e) {
   currentGamma = e.gamma;
   currentAlpha = e.alpha != null ? e.alpha : currentAlpha;
   updateAngleReadout();
-  updateLevelReadout();
   updateRoomAngleReadout();
+  if (typeof renderAngleOverlay === 'function') renderAngleOverlay();
+  if (typeof renderRoomOverlay === 'function') renderRoomOverlay();
+}
+
+/* ---- 通用校准弹窗 Shared calibrate modal (Distance + Room Scan) ---- */
+const calibrateOverlay = document.getElementById('calibrate-overlay');
+const btnDoCalibrate = document.getElementById('btn-do-calibrate');
+let calibrateCallback = null;
+
+function showCalibrateModal(onDone) {
+  calibrateCallback = onDone;
+  calibrateOverlay.hidden = false;
+}
+btnDoCalibrate.addEventListener('click', () => {
+  calibrationBeta = currentBeta;
+  calibrateOverlay.hidden = true;
+  const cb = calibrateCallback;
+  calibrateCallback = null;
+  if (cb) cb();
+});
+
+/* ---- 通用屏幕投影 Shared angular->screen projection (AR-style overlay) ---- */
+const AR_HFOV = 55, AR_VFOV = 70;
+function projectToScreen(tiltAtCapture, headingAtCapture) {
+  const tilt = currentTiltFromHorizontal();
+  const heading = currentAlpha || 0;
+  if (tilt == null) return null;
+  const deltaHeading = angleDiff(heading, headingAtCapture);
+  const deltaTilt = tiltAtCapture - tilt;
+  let x = 50 + (deltaHeading / AR_HFOV) * 100;
+  let y = 50 - (deltaTilt / AR_VFOV) * 100;
+  x = Math.max(4, Math.min(96, x));
+  y = Math.max(4, Math.min(96, y));
+  return { x, y };
+}
+
+function onDeviceMotion(e) {
+  const g = e.accelerationIncludingGravity;
+  if (!g || g.x == null || g.y == null || g.z == null) return;
+  currentAccel = { x: g.x, y: g.y, z: g.z };
+  updateLevelReadout();
 }
 
 /* ===================== 拍照测距: 模式切换 ===================== */
@@ -301,41 +359,32 @@ modeButtons.forEach(btn => {
     // stop the camera of the panel we're leaving
     const leaving = btn.dataset.mode === 'angle' ? 'video-ref' : 'video-angle';
     stopCamera(document.getElementById(leaving));
+    if (btn.dataset.mode === 'angle') initAngleMode();
   });
 });
 
-/* ===================== 模式 A: 角度 + 高度法 ===================== */
+/* ===================== 模式 A: 角度 + 高度法 (多点链式 + AR 实时叠加) ===================== */
 const videoAngle = document.getElementById('video-angle');
-const btnStartCamAngle = document.getElementById('btn-start-cam-angle');
-const btnCalibrate = document.getElementById('btn-calibrate');
-const btnLockA = document.getElementById('btn-lock-a');
-const btnLockB = document.getElementById('btn-lock-b');
+const btnUndoAngle = document.getElementById('btn-undo-angle');
+const btnCaptureAngle = document.getElementById('btn-capture-angle');
 const btnResetAngle = document.getElementById('btn-reset-angle');
-const camHeightInput = document.getElementById('cam-height');
 const angleReadout = document.getElementById('angle-readout');
-const calibrateHint = document.getElementById('calibrate-hint');
+const angleHeightReadout = document.getElementById('angle-height-readout');
+const angleSegmentsList = document.getElementById('angle-segments-list');
+const arSvgAngle = document.getElementById('ar-svg-angle');
 
 let calibrationBeta = null;
-let pointA = null; // { tilt, heading }
-let pointB = null;
+let anglePoints = []; // [{label, tiltSigned, heading, dist}]
 
-btnStartCamAngle.addEventListener('click', async () => {
+async function initAngleMode() {
   await ensureMotionPermission();
-  const stream = await startCamera(videoAngle);
-  if (stream) {
-    btnLockA.disabled = false;
+  angleHeightReadout.textContent = '相机高度 Height: ' + (appSettings.defaultCamHeight ? fmt(appSettings.defaultCamHeight, 2) + 'm' : '--');
+  const alreadyRunning = !!activeStreams[videoAngle.id];
+  await startCamera(videoAngle);
+  if (!alreadyRunning) {
+    showCalibrateModal(() => renderAngleOverlay());
   }
-});
-
-btnCalibrate.addEventListener('click', async () => {
-  const ok = await ensureMotionPermission();
-  if (!ok || currentBeta == null) {
-    alert('请先开启相机并保持手机静止片刻 Please start camera and hold still');
-    return;
-  }
-  calibrationBeta = currentBeta;
-  calibrateHint.textContent = '已校准！现在把手机往下倾斜瞄准点位。 Calibrated.';
-});
+}
 
 function currentTiltFromHorizontal() {
   if (calibrationBeta == null || currentBeta == null) return null;
@@ -357,57 +406,132 @@ function distanceFromHeightAngle(height, tiltDeg) {
   return height / Math.tan(toRad(t));
 }
 
-function lockPoint(label) {
-  const height = parseFloat(camHeightInput.value);
+function segmentDistance(p1, p2) {
+  const theta = toRad(Math.abs(angleDiff(p1.heading, p2.heading)));
+  return Math.sqrt(p1.dist * p1.dist + p2.dist * p2.dist - 2 * p1.dist * p2.dist * Math.cos(theta));
+}
+
+btnCaptureAngle.addEventListener('click', () => {
+  const height = appSettings.defaultCamHeight;
   if (!height || height <= 0) {
-    alert('请先输入相机高度 Please enter camera height');
-    return null;
+    alert('请先在「设置」中设定相机高度 Please set camera height in Settings first');
+    return;
   }
   const tilt = currentTiltFromHorizontal();
   if (tilt == null) {
-    alert('请先校准水平线 Please calibrate first');
-    return null;
+    alert('请先校准 Please calibrate first');
+    return;
   }
   const dist = distanceFromHeightAngle(height, tilt);
   if (dist == null) {
     alert('倾角太小，无法估算距离，请对准目标点再试 Angle too small');
-    return null;
+    return;
   }
-  return { tilt: Math.abs(tilt), heading: currentAlpha || 0, dist };
-}
-
-btnLockA.addEventListener('click', () => {
-  const p = lockPoint('A');
-  if (!p) return;
-  pointA = p;
-  document.getElementById('res-da').textContent = fmtLen(p.dist);
-  btnLockB.disabled = false;
-  computeAB();
+  const label = String.fromCharCode(65 + anglePoints.length);
+  anglePoints.push({ label, tiltSigned: tilt, heading: currentAlpha || 0, dist });
+  renderAngleSegmentsList();
+  renderAngleOverlay();
 });
 
-btnLockB.addEventListener('click', () => {
-  const p = lockPoint('B');
-  if (!p) return;
-  pointB = p;
-  document.getElementById('res-db').textContent = fmtLen(p.dist);
-  computeAB();
+btnUndoAngle.addEventListener('click', () => {
+  anglePoints.pop();
+  renderAngleSegmentsList();
+  renderAngleOverlay();
 });
-
-function computeAB() {
-  if (!pointA || !pointB) return;
-  const theta = toRad(Math.abs(angleDiff(pointA.heading, pointB.heading)));
-  const d1 = pointA.dist, d2 = pointB.dist;
-  const ab = Math.sqrt(d1 * d1 + d2 * d2 - 2 * d1 * d2 * Math.cos(theta));
-  document.getElementById('res-ab').textContent = fmtLen(ab);
-}
 
 btnResetAngle.addEventListener('click', () => {
-  pointA = null; pointB = null;
-  document.getElementById('res-da').textContent = '--';
-  document.getElementById('res-db').textContent = '--';
-  document.getElementById('res-ab').textContent = '--';
-  btnLockB.disabled = true;
+  anglePoints = [];
+  renderAngleSegmentsList();
+  renderAngleOverlay();
 });
+
+function renderAngleSegmentsList() {
+  if (anglePoints.length === 0) {
+    angleSegmentsList.innerHTML = '<p class="hint">点击上方 ✛ 按钮开始添加点 A、B、C... <span class="en">Tap the ✛ button above to add points A, B, C...</span></p>';
+    document.getElementById('res-total').textContent = '--';
+    return;
+  }
+  let html = '';
+  let total = 0;
+  for (let i = 0; i < anglePoints.length - 1; i++) {
+    const a = anglePoints[i], b = anglePoints[i + 1];
+    const d = segmentDistance(a, b);
+    total += d;
+    html += `<div class="result-row"><span>${a.label} → ${b.label}</span><b>${fmtLen(d)}</b></div>`;
+  }
+  if (anglePoints.length === 1) {
+    html += `<div class="result-row"><span>点 ${anglePoints[0].label} Point ${anglePoints[0].label}</span><b>${fmtLen(anglePoints[0].dist)} (距相机)</b></div>`;
+  }
+  angleSegmentsList.innerHTML = html;
+  document.getElementById('res-total').textContent = anglePoints.length >= 2 ? fmtLen(total) : '--';
+}
+
+function renderAngleOverlay() {
+  if (!arSvgAngle || !modePanels.angle.classList.contains('active')) return;
+  const ns = 'http://www.w3.org/2000/svg';
+  arSvgAngle.innerHTML = '';
+  if (calibrationBeta == null) return;
+
+  const projected = anglePoints.map(p => projectToScreen(p.tiltSigned, p.heading));
+
+  // segment lines between captured points (fixed distance labels)
+  for (let i = 0; i < anglePoints.length - 1; i++) {
+    if (!projected[i] || !projected[i + 1]) continue;
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', projected[i].x); line.setAttribute('y1', projected[i].y);
+    line.setAttribute('x2', projected[i + 1].x); line.setAttribute('y2', projected[i + 1].y);
+    line.setAttribute('class', 'ar-line');
+    arSvgAngle.appendChild(line);
+    const mid = { x: (projected[i].x + projected[i + 1].x) / 2, y: (projected[i].y + projected[i + 1].y) / 2 };
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', mid.x); label.setAttribute('y', mid.y - 2);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('class', 'ar-label');
+    label.textContent = fmt(segmentDistance(anglePoints[i], anglePoints[i + 1]), 2) + 'm';
+    arSvgAngle.appendChild(label);
+  }
+
+  // live line from last captured point to current aim (center), with live distance
+  if (anglePoints.length > 0) {
+    const last = anglePoints[anglePoints.length - 1];
+    const lastProj = projected[projected.length - 1];
+    const height = appSettings.defaultCamHeight;
+    const tilt = currentTiltFromHorizontal();
+    const liveDist = height ? distanceFromHeightAngle(height, tilt) : null;
+    if (lastProj) {
+      const line = document.createElementNS(ns, 'line');
+      line.setAttribute('x1', lastProj.x); line.setAttribute('y1', lastProj.y);
+      line.setAttribute('x2', 50); line.setAttribute('y2', 50);
+      line.setAttribute('class', 'ar-line-live');
+      arSvgAngle.appendChild(line);
+    }
+    if (liveDist != null) {
+      const liveSeg = segmentDistance(last, { heading: currentAlpha || 0, dist: liveDist });
+      const label = document.createElementNS(ns, 'text');
+      label.setAttribute('x', 50); label.setAttribute('y', 44);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('class', 'ar-label');
+      label.textContent = fmt(liveSeg, 2) + 'm';
+      arSvgAngle.appendChild(label);
+    }
+  }
+
+  // dots + labels for captured points
+  anglePoints.forEach((p, i) => {
+    const s = projected[i];
+    if (!s) return;
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', s.x); dot.setAttribute('cy', s.y); dot.setAttribute('r', 2.2);
+    dot.setAttribute('class', 'ar-dot');
+    arSvgAngle.appendChild(dot);
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', s.x); label.setAttribute('y', s.y - 4);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('class', 'ar-label');
+    label.textContent = p.label;
+    arSvgAngle.appendChild(label);
+  });
+}
 
 /* ===================== 模式 B: 参考物校正法 ===================== */
 const videoRef = document.getElementById('video-ref');
@@ -544,18 +668,64 @@ function redrawRefCanvasBlank() {
 /* ===================== 水平仪 Level ===================== */
 const videoLevel = document.getElementById('video-level');
 const btnStartCamLevel = document.getElementById('btn-start-cam-level');
-const btnEnableMotion = document.getElementById('btn-enable-motion');
+const btnSnapLevel = document.getElementById('btn-snap-level');
 const levelReadout = document.getElementById('level-readout');
 const lineH = document.getElementById('line-h');
 const lineV = document.getElementById('line-v');
 
-btnStartCamLevel.addEventListener('click', () => startCamera(videoLevel));
-btnEnableMotion.addEventListener('click', () => ensureMotionPermission());
+btnStartCamLevel.addEventListener('click', async () => {
+  await ensureMotionPermission();
+  await startCamera(videoLevel);
+});
+
+btnSnapLevel.addEventListener('click', () => {
+  if (!activeStreams[videoLevel.id]) {
+    alert('请先开启相机 Please start the camera first');
+    return;
+  }
+  const wrap = document.getElementById('camwrap-level');
+  const rect = wrap.getBoundingClientRect();
+  const cw = Math.round(rect.width), ch = Math.round(rect.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = cw; canvas.height = ch;
+  const ctx = canvas.getContext('2d');
+  drawCover(ctx, videoLevel, cw, ch);
+
+  const roll = currentAccel ? toDeg(Math.atan2(currentAccel.x, currentAccel.y)) : 0;
+  const pitch = currentAccel ? toDeg(Math.atan2(-currentAccel.z, Math.sqrt(currentAccel.x ** 2 + currentAccel.y ** 2))) : 0;
+  const level = Math.abs(roll) < 0.7;
+  ctx.strokeStyle = level ? '#33c17a' : '#e14b4b';
+  ctx.lineWidth = 2;
+  ctx.save();
+  ctx.translate(cw / 2, ch / 2);
+  ctx.rotate(toRad(-roll));
+  ctx.beginPath();
+  ctx.moveTo(-cw, 0); ctx.lineTo(cw, 0);
+  ctx.moveTo(0, -ch); ctx.lineTo(0, ch);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.font = '600 15px sans-serif';
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(8, ch - 34, 230, 26);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('roll: ' + fmt(roll, 1) + '°  pitch: ' + fmt(pitch, 1) + '°', 14, ch - 21);
+
+  canvas.toBlob(blob => downloadBlob(blob, 'level-screenshot.jpg'), 'image/jpeg', 0.92);
+});
 
 function updateLevelReadout() {
-  if (currentGamma == null || currentBeta == null) return;
-  const roll = currentGamma;
-  levelReadout.textContent = '左右 roll: ' + fmt(roll, 1) + '°  |  前后 pitch: ' + fmt(currentBeta - 90, 1) + '°';
+  if (!currentAccel) return;
+  // Roll/pitch computed from the raw gravity vector (not beta/gamma Euler angles),
+  // so the reading stays correct even when the phone is tilted steeply — Euler angles
+  // degenerate ("gimbal lock") near pitch ±90°, which is exactly when a level reading
+  // is most needed (e.g. aiming the camera up at a window frame).
+  const { x, y, z } = currentAccel;
+  const roll = toDeg(Math.atan2(x, y));
+  const pitch = toDeg(Math.atan2(-z, Math.sqrt(x * x + y * y)));
+  levelReadout.textContent = '左右 roll: ' + fmt(roll, 1) + '°  |  前后 pitch: ' + fmt(pitch, 1) + '°';
 
   const rot = -roll;
   lineH.style.transform = `rotate(${rot}deg)`;
@@ -677,60 +847,44 @@ renderTriangle();
 
 /* ===================== 房间测绘 Room Scan ===================== */
 const videoRoom = document.getElementById('video-room');
-const btnStartCamRoom = document.getElementById('btn-start-cam-room');
-const btnRoomCalibrate = document.getElementById('btn-room-calibrate');
-const roomHeightInput = document.getElementById('room-height');
 const roomAngleReadout = document.getElementById('room-angle-readout');
-const roomCalibrateHint = document.getElementById('room-calibrate-hint');
-const btnAddFloor = document.getElementById('btn-add-floor');
-const btnNewObstacle = document.getElementById('btn-new-obstacle');
-const btnAddObstacleCorner = document.getElementById('btn-add-obstacle-corner');
+const roomHeightReadout = document.getElementById('room-height-readout');
+const btnUndoRoom = document.getElementById('btn-undo-room');
+const btnCaptureRoom = document.getElementById('btn-capture-room');
 const roomHeightTargetCard = document.getElementById('room-height-target-card');
 const roomHeightTargetLabel = document.getElementById('room-height-target-label');
 const btnConfirmHeight = document.getElementById('btn-confirm-height');
 const roomPointsListEl = document.getElementById('room-points-list');
-const btnUndoRoom = document.getElementById('btn-undo-room');
 const btnResetRoom = document.getElementById('btn-reset-room');
-const chkHideObstacles = document.getElementById('chk-hide-obstacles');
 const roomPlanSvg = document.getElementById('room-plan-svg');
-const roomResArea = document.getElementById('room-res-area');
-const roomResPerimeter = document.getElementById('room-res-perimeter');
+const arSvgRoom = document.getElementById('ar-svg-room');
 const roomRemarksInput = document.getElementById('room-remarks');
 const btnExportJpg = document.getElementById('btn-export-jpg');
 const btnExportPdf = document.getElementById('btn-export-pdf');
-const roomResClosure = document.getElementById('room-res-closure');
-const btnCaptureClosure = document.getElementById('btn-capture-closure');
-const roomWallsListEl = document.getElementById('room-walls-list');
+const planPagerLabel = document.getElementById('plan-pager-label');
+const planPageContent = document.getElementById('plan-page-content');
+const btnPlanPrev = document.getElementById('btn-plan-prev');
+const btnPlanNext = document.getElementById('btn-plan-next');
 
-const ROOM_STORAGE_KEY = 'site-measure-room-scan-v2';
-const EDGE_MATCH_COLOR = '#33c17a';
-const EDGE_MISMATCH_COLOR = '#a9682e';
+const ROOM_STORAGE_KEY = 'site-measure-room-scan-v3';
+const WALL_LABEL_COLOR = '#ffb020';
 
 let roomRefHeading = null;
-let roomFloorPoints = []; // {d, heading, x, y, height, tiltAtCapture, label}
-let roomObstacles = []; // [{label, points:[{d,heading,x,y,height,tiltAtCapture,label}]}]
-let roomCurrentObstacleIndex = -1;
+let roomFloorPoints = []; // {d, heading, x, y, height, tiltAtCapture, tiltSigned, label, num}
 let roomWallOverrides = {}; // key "labelA|labelB" (sorted) -> ceiling width override (m)
-let roomPendingClosure = null; // { x, y, misclosure } from a "re-sight point 1" capture, awaiting apply/discard
-let roomLastClosureEdgeKeys = {}; // wallKey -> true for edges altered by the last applied closure adjustment
-let roomPendingHeightTarget = null; // {group:'floor'|'obstacle', gIndex, pIndex, label}
+let roomPendingHeightTarget = null; // {pIndex, label}
 let roomPointCounter = 0;
-let roomObstacleCounter = 0;
+let roomPlanPage = 0; // 0 = floor, 1..n = wall i, n+1 = ceiling
 
-btnStartCamRoom.addEventListener('click', async () => {
+async function initRoomMode() {
   await ensureMotionPermission();
+  roomHeightReadout.textContent = '相机高度 Height: ' + (appSettings.defaultCamHeight ? fmt(appSettings.defaultCamHeight, 2) + 'm' : '--');
+  const alreadyRunning = !!activeStreams[videoRoom.id];
   await startCamera(videoRoom);
-});
-
-btnRoomCalibrate.addEventListener('click', async () => {
-  const ok = await ensureMotionPermission();
-  if (!ok || currentBeta == null) {
-    alert('请先开启相机并保持手机静止片刻 Please start camera and hold still');
-    return;
+  if (!alreadyRunning) {
+    showCalibrateModal(() => renderRoomOverlay());
   }
-  calibrationBeta = currentBeta;
-  roomCalibrateHint.textContent = '已校准！保持站在原地，转动手机逐一瞄准各角落。 Calibrated.';
-});
+}
 
 function updateRoomAngleReadout() {
   if (!roomAngleReadout) return;
@@ -749,14 +903,14 @@ function roomRelHeadingXY(d, heading) {
 }
 
 function captureGroundPoint(label) {
-  const height = parseFloat(roomHeightInput.value);
+  const height = appSettings.defaultCamHeight;
   if (!height || height <= 0) {
-    alert('请先输入相机高度 Please enter camera height');
+    alert('请先在「设置」中设定相机高度 Please set camera height in Settings first');
     return null;
   }
   const tilt = currentTiltFromHorizontal();
   if (tilt == null) {
-    alert('请先校准水平线 Please calibrate first');
+    alert('请先校准 Please calibrate first');
     return null;
   }
   if (tilt >= -1) {
@@ -770,39 +924,19 @@ function captureGroundPoint(label) {
   }
   const heading = currentAlpha || 0;
   const xy = roomRelHeadingXY(d, heading);
-  return { d, heading, x: xy.x, y: xy.y, height: null, tiltAtCapture: null, label };
+  return { d, heading, x: xy.x, y: xy.y, height: null, tiltAtCapture: null, tiltSigned: tilt, label };
 }
 
-btnAddFloor.addEventListener('click', () => {
+btnCaptureRoom.addEventListener('click', () => {
   roomPointCounter++;
-  const label = '角' + roomPointCounter;
+  const label = '点' + roomPointCounter;
   const p = captureGroundPoint(label);
   if (!p) { roomPointCounter--; return; }
+  p.num = roomPointCounter;
   roomFloorPoints.push(p);
   renderRoomPointsList();
   renderRoomPlan();
-  saveRoomState();
-});
-
-btnNewObstacle.addEventListener('click', () => {
-  roomObstacleCounter++;
-  roomObstacles.push({ label: '障碍物' + roomObstacleCounter, points: [] });
-  roomCurrentObstacleIndex = roomObstacles.length - 1;
-  alert('已开始新障碍物：' + roomObstacles[roomCurrentObstacleIndex].label + '，现在点击"障碍物角"添加它的角点。');
-});
-
-btnAddObstacleCorner.addEventListener('click', () => {
-  if (roomCurrentObstacleIndex < 0) {
-    alert('请先点击"新障碍物" Please start a new obstacle first');
-    return;
-  }
-  const group = roomObstacles[roomCurrentObstacleIndex];
-  const label = group.label + '-角' + (group.points.length + 1);
-  const p = captureGroundPoint(label);
-  if (!p) return;
-  group.points.push(p);
-  renderRoomPointsList();
-  renderRoomPlan();
+  renderRoomOverlay();
   saveRoomState();
 });
 
@@ -815,13 +949,12 @@ function requestHeightFor(target) {
 btnConfirmHeight.addEventListener('click', () => {
   if (!roomPendingHeightTarget) return;
   const tilt = currentTiltFromHorizontal();
-  const height = parseFloat(roomHeightInput.value);
+  const height = appSettings.defaultCamHeight;
   if (tilt == null || !height) {
-    alert('请先校准并输入相机高度 Please calibrate and enter camera height');
+    alert('请先校准 Please calibrate first');
     return;
   }
-  const target = roomPendingHeightTarget;
-  const base = target.group === 'floor' ? roomFloorPoints[target.pIndex] : roomObstacles[target.gIndex].points[target.pIndex];
+  const base = roomFloorPoints[roomPendingHeightTarget.pIndex];
   base.tiltAtCapture = tilt;
   base.height = height + base.d * Math.tan(toRad(tilt));
   roomPendingHeightTarget = null;
@@ -832,38 +965,28 @@ btnConfirmHeight.addEventListener('click', () => {
 });
 
 function renderRoomPointsList() {
-  const items = [];
-  roomFloorPoints.forEach((p, i) => {
-    items.push({ p, group: 'floor', gIndex: -1, pIndex: i, tag: '地板', obstacle: false });
-  });
-  roomObstacles.forEach((g, gi) => {
-    g.points.forEach((p, pi) => {
-      items.push({ p, group: 'obstacle', gIndex: gi, pIndex: pi, tag: '障碍物', obstacle: true });
-    });
-  });
-
-  if (items.length === 0) {
+  if (roomFloorPoints.length === 0) {
     roomPointsListEl.innerHTML = '<p class="hint">尚未记录任何点。</p>';
     return;
   }
-
   roomPointsListEl.innerHTML = '';
-  items.forEach(item => {
+  roomFloorPoints.forEach((p, i) => {
+    const target = { pIndex: i, label: p.label };
     const row = document.createElement('div');
     row.className = 'room-point-item';
-    const target = { group: item.group, gIndex: item.gIndex, pIndex: item.pIndex, label: item.p.label };
-    const heightText = item.p.height != null ? (' → 高度 ' + fmt(item.p.height, 2) + 'm') : '';
-    const angle = cornerInteriorAngle(getPolygonAndIndex(target).poly, getPolygonAndIndex(target).idx);
+    const heightText = p.height != null ? (' → 高度 ' + fmt(p.height, 2) + 'm') : '';
+    const { poly, idx } = getPolygonAndIndex(target);
+    const angle = cornerInteriorAngle(poly, idx);
     const angleText = angle != null ? (' · 转角≈' + fmt(angle, 1) + '°') : '';
     const span = document.createElement('span');
-    span.innerHTML = `<span class="rp-tag ${item.obstacle ? 'obstacle' : ''}">${item.tag}</span>${item.p.label} (d=${fmt(item.p.d, 2)}m)${heightText}${angleText}`;
+    span.innerHTML = `${p.label} <span class="en">Point ${p.num}</span> (d=${fmt(p.d, 2)}m)${heightText}${angleText}`;
     row.appendChild(span);
 
     const actions = document.createElement('div');
     actions.className = 'rp-actions';
 
     const btnHeight = document.createElement('button');
-    btnHeight.textContent = item.p.height != null ? '重测顶部' : '+顶部高度';
+    btnHeight.textContent = p.height != null ? '重测顶部' : '+顶部高度';
     btnHeight.addEventListener('click', () => requestHeightFor(target));
     actions.appendChild(btnHeight);
 
@@ -897,7 +1020,7 @@ function renderRoomPointsList() {
 
 function getPolygonAndIndex(target) {
   const p = getRoomPoint(target);
-  const poly = target.group === 'floor' ? orderedFloorPoints() : roomObstacles[target.gIndex].points;
+  const poly = orderedFloorPoints();
   return { poly, idx: poly.indexOf(p) };
 }
 
@@ -983,7 +1106,7 @@ function editRoomCornerAngle(target) {
   curr.d = Math.hypot(newX, newY);
   curr.heading = roomRefHeading + toDeg(Math.atan2(newY, newX));
   if (curr.tiltAtCapture != null) {
-    const camHeight = parseFloat(roomHeightInput.value) || 0;
+    const camHeight = appSettings.defaultCamHeight || 0;
     curr.height = camHeight + curr.d * Math.tan(toRad(curr.tiltAtCapture));
   }
 
@@ -993,23 +1116,19 @@ function editRoomCornerAngle(target) {
 }
 
 function getRoomPoint(target) {
-  return target.group === 'floor' ? roomFloorPoints[target.pIndex] : roomObstacles[target.gIndex].points[target.pIndex];
+  return roomFloorPoints[target.pIndex];
 }
 
 function deleteRoomPoint(target) {
   if (!confirm('确定要删除 ' + target.label + ' 吗？ Delete this point?')) return;
-  if (target.group === 'floor') {
-    roomFloorPoints.splice(target.pIndex, 1);
-  } else {
-    roomObstacles[target.gIndex].points.splice(target.pIndex, 1);
-  }
-  if (roomPendingHeightTarget && roomPendingHeightTarget.group === target.group &&
-      roomPendingHeightTarget.gIndex === target.gIndex && roomPendingHeightTarget.pIndex === target.pIndex) {
+  roomFloorPoints.splice(target.pIndex, 1);
+  if (roomPendingHeightTarget && roomPendingHeightTarget.pIndex === target.pIndex) {
     roomPendingHeightTarget = null;
     roomHeightTargetCard.hidden = true;
   }
   renderRoomPointsList();
   renderRoomPlan();
+  renderRoomOverlay();
   saveRoomState();
 }
 
@@ -1026,7 +1145,7 @@ function editRoomPoint(target) {
   const xy = roomRelHeadingXY(p.d, p.heading);
   p.x = xy.x; p.y = xy.y;
   if (p.tiltAtCapture != null) {
-    const camHeight = parseFloat(roomHeightInput.value) || 0;
+    const camHeight = appSettings.defaultCamHeight || 0;
     p.height = camHeight + p.d * Math.tan(toRad(p.tiltAtCapture));
   }
   if (p.height != null) {
@@ -1042,38 +1161,100 @@ function editRoomPoint(target) {
 }
 
 btnUndoRoom.addEventListener('click', () => {
-  if (roomCurrentObstacleIndex >= 0 && roomObstacles[roomCurrentObstacleIndex] && roomObstacles[roomCurrentObstacleIndex].points.length > 0) {
-    roomObstacles[roomCurrentObstacleIndex].points.pop();
-  } else if (roomFloorPoints.length > 0) {
-    roomFloorPoints.pop();
-  }
+  roomFloorPoints.pop();
   renderRoomPointsList();
   renderRoomPlan();
+  renderRoomOverlay();
   saveRoomState();
 });
 
 btnResetRoom.addEventListener('click', () => {
   if (!confirm('确定要清空所有已记录的点吗？ Reset all captured points?')) return;
   roomFloorPoints = [];
-  roomObstacles = [];
-  roomCurrentObstacleIndex = -1;
   roomRefHeading = null;
   roomPointCounter = 0;
-  roomObstacleCounter = 0;
   roomPendingHeightTarget = null;
   roomHeightTargetCard.hidden = true;
   roomRemarksInput.value = '';
   roomWallOverrides = {};
-  roomPendingClosure = null;
-  roomLastClosureEdgeKeys = {};
-  document.getElementById('room-closure-pending').hidden = true;
+  roomPlanPage = 0;
   renderRoomPointsList();
   renderRoomPlan();
+  renderRoomOverlay();
   saveRoomState();
 });
 
-chkHideObstacles.addEventListener('change', renderRoomPlan);
 roomRemarksInput.addEventListener('input', saveRoomState);
+
+function renderRoomOverlay() {
+  if (!arSvgRoom) return;
+  const roomTab = document.getElementById('tab-room');
+  if (roomTab.hidden) return;
+  const ns = 'http://www.w3.org/2000/svg';
+  arSvgRoom.innerHTML = '';
+  if (calibrationBeta == null) return;
+
+  const projected = roomFloorPoints.map(p => projectToScreen(p.tiltSigned, p.heading));
+
+  for (let i = 0; i < roomFloorPoints.length - 1; i++) {
+    if (!projected[i] || !projected[i + 1]) continue;
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', projected[i].x); line.setAttribute('y1', projected[i].y);
+    line.setAttribute('x2', projected[i + 1].x); line.setAttribute('y2', projected[i + 1].y);
+    line.setAttribute('class', 'ar-line');
+    arSvgRoom.appendChild(line);
+    const dist = Math.hypot(roomFloorPoints[i + 1].x - roomFloorPoints[i].x, roomFloorPoints[i + 1].y - roomFloorPoints[i].y);
+    const mid = { x: (projected[i].x + projected[i + 1].x) / 2, y: (projected[i].y + projected[i + 1].y) / 2 };
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', mid.x); label.setAttribute('y', mid.y - 2);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('class', 'ar-label');
+    label.textContent = fmt(dist, 2) + 'm';
+    arSvgRoom.appendChild(label);
+  }
+
+  if (roomFloorPoints.length > 0) {
+    const last = roomFloorPoints[roomFloorPoints.length - 1];
+    const lastProj = projected[projected.length - 1];
+    const height = appSettings.defaultCamHeight;
+    const tilt = currentTiltFromHorizontal();
+    if (lastProj) {
+      const line = document.createElementNS(ns, 'line');
+      line.setAttribute('x1', lastProj.x); line.setAttribute('y1', lastProj.y);
+      line.setAttribute('x2', 50); line.setAttribute('y2', 50);
+      line.setAttribute('class', 'ar-line-live');
+      arSvgRoom.appendChild(line);
+    }
+    if (height && tilt != null && tilt < -1) {
+      const liveDist = distanceFromHeightAngle(height, tilt);
+      if (liveDist != null) {
+        const theta = toRad(Math.abs(angleDiff(last.heading, currentAlpha || 0)));
+        const liveSeg = Math.sqrt(last.d * last.d + liveDist * liveDist - 2 * last.d * liveDist * Math.cos(theta));
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('x', 50); label.setAttribute('y', 44);
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('class', 'ar-label');
+        label.textContent = fmt(liveSeg, 2) + 'm';
+        arSvgRoom.appendChild(label);
+      }
+    }
+  }
+
+  roomFloorPoints.forEach((p, i) => {
+    const s = projected[i];
+    if (!s) return;
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', s.x); dot.setAttribute('cy', s.y); dot.setAttribute('r', 2.2);
+    dot.setAttribute('class', 'ar-dot');
+    arSvgRoom.appendChild(dot);
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', s.x); label.setAttribute('y', s.y - 4);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('class', 'ar-label');
+    label.textContent = String(p.num);
+    arSvgRoom.appendChild(label);
+  });
+}
 
 function orderedFloorPoints() {
   // Connect floor corners by angle around their centroid so deleting/re-adding
@@ -1155,94 +1336,8 @@ function makeIsoProjector(worldPoints, boxSize, padding, originX, originY) {
   };
 }
 
-// NOTE: points are each measured independently from one fixed camera origin, so a
-// polygon built purely from their (x,y) always "closes" mathematically by definition
-// (the edge vectors of any closed loop of absolute coordinates sum to zero) — that is
-// NOT a real error signal. A meaningful closure error only exists if the user actually
-// re-sights an existing corner (typically point 1) a second time as an independent
-// check; the gap between that fresh reading and the original point is real measurement
-// discrepancy. That's what "闭合点 / Re-sight point 1" below captures.
-
-function edgeChangedByKey(labelA, labelB) {
-  return !!roomLastClosureEdgeKeys[wallKey(labelA, labelB)];
-}
-
-// Closure uses the raw capture-order array (roomFloorPoints), not the angularly
-// re-sorted orderedFloorPoints() used for rendering — "re-sighting point 1" only
-// makes sense relative to the actual order the user walked/aimed around the room,
-// with point 0 = the very first floor corner captured.
-btnCaptureClosure.addEventListener('click', () => {
-  if (roomFloorPoints.length < 3) {
-    alert('至少需要 3 个地板角点才能检查闭合 Need at least 3 floor points first');
-    return;
-  }
-  const p = captureGroundPoint('闭合点');
-  if (!p) return;
-  const anchor = roomFloorPoints[0];
-  const misclosure = Math.hypot(p.x - anchor.x, p.y - anchor.y);
-  roomPendingClosure = { x: p.x, y: p.y, misclosure };
-  document.getElementById('room-closure-pending').hidden = false;
-  roomResClosure.textContent = fmt(misclosure, 3) + ' m';
-});
-
-document.getElementById('btn-discard-closure').addEventListener('click', () => {
-  roomPendingClosure = null;
-  document.getElementById('room-closure-pending').hidden = true;
-});
-
-document.getElementById('btn-apply-closure').addEventListener('click', () => {
-  if (!roomPendingClosure) return;
-  const poly = roomFloorPoints;
-  const n = poly.length;
-  if (n < 3) return;
-
-  const beforeLens = [];
-  for (let i = 0; i < n; i++) {
-    const a = poly[i], b = poly[(i + 1) % n];
-    beforeLens.push(Math.hypot(b.x - a.x, b.y - a.y));
-  }
-
-  const misVec = { x: roomPendingClosure.x - poly[0].x, y: roomPendingClosure.y - poly[0].y };
-  const edgeLens = [];
-  for (let i = 0; i < n - 1; i++) {
-    edgeLens.push(Math.hypot(poly[i + 1].x - poly[i].x, poly[i + 1].y - poly[i].y));
-  }
-  edgeLens.push(Math.hypot(roomPendingClosure.x - poly[n - 1].x, roomPendingClosure.y - poly[n - 1].y));
-  const total = edgeLens.reduce((s, l) => s + l, 0) || 1;
-
-  const camHeight = parseFloat(roomHeightInput.value) || 0;
-  let cum = 0;
-  for (let i = 1; i < n; i++) {
-    cum += edgeLens[i - 1];
-    const frac = cum / total;
-    const p = poly[i];
-    p.x -= misVec.x * frac;
-    p.y -= misVec.y * frac;
-    p.d = Math.hypot(p.x, p.y);
-    p.heading = roomRefHeading + toDeg(Math.atan2(p.y, p.x));
-    if (p.tiltAtCapture != null) p.height = camHeight + p.d * Math.tan(toRad(p.tiltAtCapture));
-  }
-
-  roomLastClosureEdgeKeys = {};
-  for (let i = 0; i < n; i++) {
-    const a = poly[i], b = poly[(i + 1) % n];
-    const afterLen = Math.hypot(b.x - a.x, b.y - a.y);
-    const tolerance = Math.max(0.02, beforeLens[i] * 0.02);
-    if (Math.abs(afterLen - beforeLens[i]) > tolerance) {
-      roomLastClosureEdgeKeys[wallKey(a.label, b.label)] = true;
-    }
-  }
-
-  roomPendingClosure = null;
-  document.getElementById('room-closure-pending').hidden = true;
-  renderRoomPointsList();
-  renderRoomPlan();
-  renderRoomWallsList();
-  saveRoomState();
-});
-
 function rescaleRoom(scaleFactor) {
-  const camHeight = parseFloat(roomHeightInput.value) || 0;
+  const camHeight = appSettings.defaultCamHeight || 0;
   function rescalePoint(p) {
     p.d *= scaleFactor;
     const xy = roomRelHeadingXY(p.d, p.heading);
@@ -1252,29 +1347,48 @@ function rescaleRoom(scaleFactor) {
     }
   }
   roomFloorPoints.forEach(rescalePoint);
-  roomObstacles.forEach(g => g.points.forEach(rescalePoint));
   Object.keys(roomWallOverrides).forEach(key => { roomWallOverrides[key] *= scaleFactor; });
 }
 
+function planTotalPages() {
+  const n = orderedFloorPoints().length;
+  return n >= 3 ? n + 2 : 1; // 0=floor, 1..n=walls, n+1=ceiling
+}
+
+function clampPlanPage() {
+  const total = planTotalPages();
+  if (roomPlanPage >= total) roomPlanPage = total - 1;
+  if (roomPlanPage < 0) roomPlanPage = 0;
+}
+
+btnPlanPrev.addEventListener('click', () => {
+  const total = planTotalPages();
+  roomPlanPage = (roomPlanPage - 1 + total) % total;
+  renderRoomPlan();
+});
+btnPlanNext.addEventListener('click', () => {
+  const total = planTotalPages();
+  roomPlanPage = (roomPlanPage + 1) % total;
+  renderRoomPlan();
+});
+
 function renderRoomPlan() {
+  clampPlanPage();
   const svg = roomPlanSvg;
   svg.innerHTML = '';
   const ns = 'http://www.w3.org/2000/svg';
 
   const floorOrdered = orderedFloorPoints();
   const n = floorOrdered.length;
-  const showObstacles = !chkHideObstacles.checked && roomObstacles.length > 0;
-  const allPoints = roomFloorPoints.concat(...roomObstacles.map(g => g.points));
 
-  if (allPoints.length === 0) {
+  if (roomFloorPoints.length === 0) {
     const txt = document.createElementNS(ns, 'text');
     txt.setAttribute('x', 160); txt.setAttribute('y', 160);
     txt.setAttribute('text-anchor', 'middle');
     txt.setAttribute('class', 'plan-text');
     txt.textContent = '尚无数据';
     svg.appendChild(txt);
-    updateRoomSummary();
-    renderRoomWallsList();
+    renderPlanPageContent();
     return;
   }
 
@@ -1283,34 +1397,22 @@ function renderRoomPlan() {
   const usedHeights = floorOrdered.map(p => p.height != null ? p.height : avgHeight);
   const ceilingXY = computeCeilingXY(floorOrdered);
 
-  const obstacleHeights = roomObstacles.map(g => {
-    const hs = g.points.map(p => p.height).filter(h => h != null);
-    return hs.length ? hs.reduce((a, b) => a + b, 0) / hs.length : Math.min(avgHeight, 1.2);
-  });
-
   const worldPoints = [];
   floorOrdered.forEach((p, i) => {
     worldPoints.push({ x: p.x, y: p.y, z: 0 });
     worldPoints.push({ x: ceilingXY[i].x, y: ceilingXY[i].y, z: usedHeights[i] });
   });
-  if (showObstacles) {
-    roomObstacles.forEach((g, gi) => {
-      g.points.forEach(p => {
-        worldPoints.push({ x: p.x, y: p.y, z: 0 });
-        worldPoints.push({ x: p.x, y: p.y, z: obstacleHeights[gi] });
-      });
-    });
-  }
   const project = makeIsoProjector(worldPoints, 320, 26, 0, 0);
 
-  // floor face: a very light fill just to ground the wireframe, not a solid surface
-  if (n >= 3) {
+  function svgPoly(pts, fillColor, strokeColor, strokeWidth) {
     const poly = document.createElementNS(ns, 'polygon');
-    poly.setAttribute('points', floorOrdered.map(p => { const s = project(p.x, p.y, 0); return s.x + ',' + s.y; }).join(' '));
-    poly.setAttribute('class', 'floor-fill');
+    poly.setAttribute('points', pts.map(p => p.x + ',' + p.y).join(' '));
+    poly.style.fill = fillColor;
+    poly.style.stroke = strokeColor;
+    poly.style.strokeWidth = strokeWidth;
     svg.appendChild(poly);
+    return poly;
   }
-
   function wireLine(p1, p2, cssClass) {
     const line = document.createElementNS(ns, 'line');
     line.setAttribute('x1', p1.x); line.setAttribute('y1', p1.y);
@@ -1321,6 +1423,14 @@ function renderRoomPlan() {
   }
 
   const numEdges = n >= 3 ? n : n - 1;
+  const DIM_FILL = 'rgba(255,255,255,0.04)', DIM_STROKE = 'rgba(255,255,255,0.25)';
+  const SEL_FILL = 'rgba(255,176,32,0.30)', SEL_STROKE = 'var(--accent, #ffb020)';
+
+  // floor face
+  if (n >= 3) {
+    const selected = roomPlanPage === 0;
+    svgPoly(floorOrdered.map(p => project(p.x, p.y, 0)), selected ? SEL_FILL : DIM_FILL, selected ? SEL_STROKE : DIM_STROKE, selected ? 2.5 : 1.2);
+  }
 
   // vertical wall edges (floor corner -> its ceiling corner)
   for (let i = 0; i < n; i++) {
@@ -1329,11 +1439,19 @@ function renderRoomPlan() {
     wireLine(base, top, 'wire-vertical');
   }
 
-  // ceiling outline
+  // wall faces (filled quads, highlighted per current page)
   for (let i = 0; i < numEdges; i++) {
-    const a = project(ceilingXY[i].x, ceilingXY[i].y, usedHeights[i]);
-    const b = project(ceilingXY[(i + 1) % n].x, ceilingXY[(i + 1) % n].y, usedHeights[(i + 1) % n]);
-    wireLine(a, b, 'wire-ceiling');
+    const a = floorOrdered[i], b = floorOrdered[(i + 1) % n];
+    const ca = ceilingXY[i], cb = ceilingXY[(i + 1) % n];
+    const quad = [project(a.x, a.y, 0), project(b.x, b.y, 0), project(cb.x, cb.y, usedHeights[(i + 1) % n]), project(ca.x, ca.y, usedHeights[i])];
+    const selected = roomPlanPage === i + 1;
+    svgPoly(quad, selected ? SEL_FILL : DIM_FILL, selected ? SEL_STROKE : DIM_STROKE, selected ? 2.5 : 1.2);
+  }
+
+  // ceiling: outline only, no fill color, ever (brighter outline when its page is selected)
+  if (n >= 3) {
+    const ceilingSelected = roomPlanPage === n + 1;
+    svgPoly(floorOrdered.map((p, i) => project(ceilingXY[i].x, ceilingXY[i].y, usedHeights[i])), 'none', ceilingSelected ? SEL_STROKE : 'rgba(255,255,255,0.35)', ceilingSelected ? 2.5 : 1.5);
   }
 
   // ground edges: the primary clickable/labelled measurements
@@ -1350,9 +1468,8 @@ function renderRoomPlan() {
     label.setAttribute('x', mid.x); label.setAttribute('y', mid.y + 12);
     label.setAttribute('text-anchor', 'middle');
     label.setAttribute('class', 'plan-text');
-    const changed = n >= 3 && edgeChangedByKey(a.label, b.label);
-    label.style.fill = changed ? EDGE_MISMATCH_COLOR : EDGE_MATCH_COLOR;
-    label.style.fontWeight = changed ? 'normal' : 'bold';
+    label.style.fill = WALL_LABEL_COLOR;
+    label.style.fontWeight = 'bold';
     label.textContent = '墙' + wallLetter(i) + ' ' + fmt(dist, 2) + 'm';
     svg.appendChild(label);
   }
@@ -1363,6 +1480,12 @@ function renderRoomPlan() {
     dot.setAttribute('cx', s.x); dot.setAttribute('cy', s.y); dot.setAttribute('r', 3.5);
     dot.setAttribute('class', 'plan-dot');
     svg.appendChild(dot);
+    const numLabel = document.createElementNS(ns, 'text');
+    numLabel.setAttribute('x', s.x); numLabel.setAttribute('y', s.y - 6);
+    numLabel.setAttribute('text-anchor', 'middle');
+    numLabel.setAttribute('class', 'plan-text');
+    numLabel.textContent = String(p.num);
+    svg.appendChild(numLabel);
     if (p.height != null) {
       const top = project(ceilingXY[i].x, ceilingXY[i].y, usedHeights[i]);
       const t = document.createElementNS(ns, 'text');
@@ -1374,102 +1497,81 @@ function renderRoomPlan() {
     }
   });
 
-  if (showObstacles) {
-    roomObstacles.forEach((g, gi) => {
-      const gh = obstacleHeights[gi];
-      const gn = g.points.length;
-      const edges = gn >= 3 ? gn : gn - 1;
-      for (let i = 0; i < gn; i++) {
-        const base = project(g.points[i].x, g.points[i].y, 0);
-        const top = project(g.points[i].x, g.points[i].y, gh);
-        wireLine(base, top, 'obstacle-shape');
-      }
-      for (let i = 0; i < edges; i++) {
-        const a = g.points[i], b = g.points[(i + 1) % gn];
-        wireLine(project(a.x, a.y, 0), project(b.x, b.y, 0), 'obstacle-shape');
-        wireLine(project(a.x, a.y, gh), project(b.x, b.y, gh), 'obstacle-shape');
-      }
-      g.points.forEach(p => {
-        const s = project(p.x, p.y, 0);
-        const dot = document.createElementNS(ns, 'circle');
-        dot.setAttribute('cx', s.x); dot.setAttribute('cy', s.y); dot.setAttribute('r', 3);
-        dot.setAttribute('class', 'obstacle-shape');
-        svg.appendChild(dot);
-      });
-    });
-  }
-
   updateRoomSummary();
-  renderRoomWallsList();
+  renderPlanPageContent();
 }
 
-function renderRoomWallsList() {
+function renderPlanPageContent() {
   const floorOrdered = orderedFloorPoints();
   const n = floorOrdered.length;
-  if (n < 2) {
-    roomWallsListEl.innerHTML = '<p class="hint">至少需要 2 个地板角点。</p>';
+
+  if (n < 3) {
+    planPagerLabel.textContent = '地板 Floor';
+    planPageContent.innerHTML =
+      '<div class="result-row highlight"><span>地板面积 Floor area</span><b id="room-res-area">--</b></div>' +
+      '<div class="result-row"><span>地板周长 Perimeter</span><b id="room-res-perimeter">--</b></div>';
+    updateRoomSummary();
     return;
   }
-  const numEdges = n >= 3 ? n : 1;
-  roomWallsListEl.innerHTML = '';
-  for (let i = 0; i < numEdges; i++) {
+
+  if (roomPlanPage === 0) {
+    planPagerLabel.textContent = '地板 Floor';
+    planPageContent.innerHTML =
+      '<div class="result-row highlight"><span>地板面积 Floor area</span><b id="room-res-area">--</b></div>' +
+      '<div class="result-row"><span>地板周长 Perimeter</span><b id="room-res-perimeter">--</b></div>';
+    updateRoomSummary();
+  } else if (roomPlanPage <= n) {
+    const i = roomPlanPage - 1;
     const a = floorOrdered[i], b = floorOrdered[(i + 1) % n];
     const groundWidth = Math.hypot(b.x - a.x, b.y - a.y);
     const key = wallKey(a.label, b.label);
     const ceilingWidth = getWallCeilingWidth(a.label, b.label, groundWidth);
     const hasOverride = roomWallOverrides[key] != null;
-    const changed = n >= 3 && edgeChangedByKey(a.label, b.label);
-    const matches = !changed;
-
     let wallH = null;
     if (a.height != null && b.height != null) wallH = (a.height + b.height) / 2;
     else if (a.height != null) wallH = a.height;
     else if (b.height != null) wallH = b.height;
     const area = wallH != null ? ((groundWidth + ceilingWidth) / 2) * wallH : null;
 
-    const row = document.createElement('div');
-    row.className = 'room-point-item';
-    const heightsText = '高度 H: ' + a.label + '=' + (a.height != null ? fmt(a.height, 2) + 'm' : '--') +
-      ' ｜ ' + b.label + '=' + (b.height != null ? fmt(b.height, 2) + 'm' : '--');
-    const areaText = area != null ? (' ｜ 面积≈' + fmt(area, 2) + ' sqm') : '';
-    const span = document.createElement('span');
-    span.innerHTML = `<span class="rp-tag" style="color:${matches ? EDGE_MATCH_COLOR : EDGE_MISMATCH_COLOR}">墙${wallLetter(i)}</span>` +
-      `${a.label}↔${b.label}<br>地面宽 ${fmt(groundWidth, 2)}m ｜ 天花宽 ${fmt(ceilingWidth, 2)}m${hasOverride ? ' (已修改)' : ''}<br>${heightsText}${areaText}`;
-    row.appendChild(span);
-
-    const actions = document.createElement('div');
-    actions.className = 'rp-actions';
-
-    const btnEditCeil = document.createElement('button');
-    btnEditCeil.className = 'rp-btn-edit';
-    btnEditCeil.textContent = '✎天花宽';
-    btnEditCeil.title = '修改天花宽度 Edit ceiling width';
-    btnEditCeil.addEventListener('click', () => {
+    planPagerLabel.textContent = '墙' + wallLetter(i) + ' Wall ' + wallLetter(i);
+    planPageContent.innerHTML =
+      `<div class="result-row"><span>连接点 Points</span><b>${a.label} → ${b.label}</b></div>` +
+      `<div class="result-row"><span>地面宽 Ground width</span><b>${fmt(groundWidth, 2)}m</b></div>` +
+      `<div class="result-row"><span>天花宽 Ceiling width</span><b>${fmt(ceilingWidth, 2)}m${hasOverride ? ' (已修改)' : ''}</b></div>` +
+      `<div class="result-row"><span>高度 ${a.label}</span><b>${a.height != null ? fmt(a.height, 2) + 'm' : '--'}</b></div>` +
+      `<div class="result-row"><span>高度 ${b.label}</span><b>${b.height != null ? fmt(b.height, 2) + 'm' : '--'}</b></div>` +
+      `<div class="result-row highlight"><span>估计面积 Area</span><b>${area != null ? fmt(area, 2) + ' sqm' : '--'}</b></div>` +
+      `<div class="btn-row" style="margin-top:8px;">` +
+      `<button class="btn-secondary" id="btn-edit-ceiling-width">✎ 修改天花宽 Edit ceiling width</button>` +
+      (hasOverride ? `<button class="btn-secondary" id="btn-reset-ceiling-width">↺ 恢复默认 Reset</button>` : '') +
+      `</div>`;
+    document.getElementById('btn-edit-ceiling-width').addEventListener('click', () => {
       const input = prompt('修改墙' + wallLetter(i) + ' (' + a.label + '↔' + b.label + ') 的天花宽度 (m)，默认与地面宽度相同：\nEdit ceiling width (m), defaults to same as ground width:', fmt(ceilingWidth, 2));
       if (input == null) return;
       const val = parseFloat(input);
       if (!val || val <= 0) { alert('请输入有效的数字 Please enter a valid number'); return; }
       roomWallOverrides[key] = val;
-      renderRoomWallsList();
+      renderRoomPlan();
       saveRoomState();
     });
-    actions.appendChild(btnEditCeil);
-
-    if (hasOverride) {
-      const btnReset = document.createElement('button');
-      btnReset.className = 'rp-btn-delete';
-      btnReset.textContent = '↺';
-      btnReset.title = '恢复与地面相同 Reset to same as ground';
-      btnReset.addEventListener('click', () => {
-        delete roomWallOverrides[key];
-        renderRoomWallsList();
-        saveRoomState();
-      });
-      actions.appendChild(btnReset);
+    const resetBtn = document.getElementById('btn-reset-ceiling-width');
+    if (resetBtn) resetBtn.addEventListener('click', () => {
+      delete roomWallOverrides[key];
+      renderRoomPlan();
+      saveRoomState();
+    });
+  } else {
+    const ceilingXY = computeCeilingXY(floorOrdered);
+    let area = 0;
+    for (let i = 0; i < n; i++) {
+      const p1 = ceilingXY[i], p2 = ceilingXY[(i + 1) % n];
+      area += p1.x * p2.y - p2.x * p1.y;
     }
-
-    row.appendChild(actions);
-    roomWallsListEl.appendChild(row);
+    area = Math.abs(area) / 2;
+    planPagerLabel.textContent = '天花板 Ceiling';
+    planPageContent.innerHTML =
+      `<div class="result-row highlight"><span>天花板面积 Ceiling area</span><b>${fmtArea(area)}</b></div>` +
+      `<p class="hint">天花板面积按各墙天花宽度估算得出，若有斜墙可能与地板面积不同。<span class="en">Ceiling area is estimated from each wall's ceiling width, and may differ from the floor area if any walls lean.</span></p>`;
   }
 }
 
@@ -1490,11 +1592,14 @@ function onEdgeClick(currentDist) {
 
 /* ---- 面积/周长 Area & perimeter (shoelace formula) ---- */
 function updateRoomSummary() {
+  const areaEl = document.getElementById('room-res-area');
+  const perimeterEl = document.getElementById('room-res-perimeter');
+  if (!areaEl || !perimeterEl) return;
   const floorOrdered = orderedFloorPoints();
   const n = floorOrdered.length;
   if (n < 3) {
-    roomResArea.textContent = '--';
-    roomResPerimeter.textContent = '--';
+    areaEl.textContent = '--';
+    perimeterEl.textContent = '--';
     return;
   }
   let area = 0, perimeter = 0;
@@ -1505,17 +1610,16 @@ function updateRoomSummary() {
     perimeter += Math.hypot(b.x - a.x, b.y - a.y);
   }
   area = Math.abs(area) / 2;
-  roomResArea.textContent = fmtArea(area);
-  roomResPerimeter.textContent = fmtLen(perimeter);
+  areaEl.textContent = fmtArea(area);
+  perimeterEl.textContent = fmtLen(perimeter);
 }
 
 /* ---- 本地保存 Local persistence (survive page reload) ---- */
 function saveRoomState() {
   try {
     const state = {
-      roomRefHeading, roomFloorPoints, roomObstacles, roomCurrentObstacleIndex,
-      roomPointCounter, roomObstacleCounter, roomWallOverrides, roomLastClosureEdgeKeys,
-      camHeight: roomHeightInput.value, remarks: roomRemarksInput.value
+      roomRefHeading, roomFloorPoints, roomPointCounter, roomWallOverrides,
+      remarks: roomRemarksInput.value
     };
     localStorage.setItem(ROOM_STORAGE_KEY, JSON.stringify(state));
   } catch (err) { /* storage unavailable, ignore */ }
@@ -1528,13 +1632,8 @@ function loadRoomState() {
     const state = JSON.parse(raw);
     roomRefHeading = state.roomRefHeading;
     roomFloorPoints = state.roomFloorPoints || [];
-    roomObstacles = state.roomObstacles || [];
-    roomCurrentObstacleIndex = state.roomCurrentObstacleIndex != null ? state.roomCurrentObstacleIndex : -1;
     roomPointCounter = state.roomPointCounter || 0;
-    roomObstacleCounter = state.roomObstacleCounter || 0;
     roomWallOverrides = state.roomWallOverrides || {};
-    roomLastClosureEdgeKeys = state.roomLastClosureEdgeKeys || {};
-    if (state.camHeight) roomHeightInput.value = state.camHeight;
     if (state.remarks) roomRemarksInput.value = state.remarks;
   } catch (err) { /* corrupt data, ignore */ }
 }
@@ -1624,11 +1723,10 @@ async function buildReportCanvas() {
       else if (a.height != null) wallH = a.height;
       else if (b.height != null) wallH = b.height;
       const area = wallH != null ? ((groundWidth + ceilingWidth) / 2) * wallH : null;
-      const matches = n < 3 ? true : !edgeChangedByKey(a.label, b.label);
       wallInfo.push({
         letter: wallLetter(i), aLabel: a.label, bLabel: b.label, aHeight: a.height, bHeight: b.height,
         groundWidth, ceilingWidth, hasCeilingOverride: roomWallOverrides[wallKey(a.label, b.label)] != null,
-        area, matches
+        area
       });
     }
   }
@@ -1665,12 +1763,14 @@ async function buildReportCanvas() {
   const now = new Date();
   ctx.fillText('日期 Date: ' + now.toLocaleString(), 40, y);
   y += 20;
-  const camHeight = parseFloat(roomHeightInput.value);
+  const camHeight = appSettings.defaultCamHeight;
+  const areaText = document.getElementById('room-res-area') ? document.getElementById('room-res-area').textContent : '--';
+  const perimText = document.getElementById('room-res-perimeter') ? document.getElementById('room-res-perimeter').textContent : '--';
   ctx.fillText('相机高度 Camera height: ' + (camHeight ? fmt(camHeight, 2) + ' m' : '--') +
-    '    地板面积 Area: ' + roomResArea.textContent + '    周长 Perimeter: ' + roomResPerimeter.textContent, 40, y);
+    '    地板面积 Area: ' + areaText + '    周长 Perimeter: ' + perimText, 40, y);
   y += 26;
 
-  // ---- 3D isometric drawing ----
+  // ---- 3D isometric drawing (no obstacles; ceiling is outline-only, no fill color) ----
   const drawTop = y;
   if (n >= 3) {
     const hue = Math.floor(Math.random() * 360);
@@ -1678,28 +1778,15 @@ async function buildReportCanvas() {
     const floorStroke = `hsla(${hue},65%,32%,0.9)`;
     const wallFill = `hsla(${(hue + 120) % 360},50%,55%,0.25)`;
     const wallStroke = `hsla(${(hue + 120) % 360},50%,30%,0.9)`;
-    const ceilFill = `hsla(${(hue + 240) % 360},50%,60%,0.25)`;
-    const ceilStroke = `hsla(${(hue + 240) % 360},50%,32%,0.9)`;
-    const obstacleFill = 'rgba(225,75,75,0.28)';
-    const obstacleStroke = 'rgba(180,40,40,0.9)';
+    const ceilStroke = '#555';
 
     const ceilingXY = computeCeilingXY(floorOrdered);
-    const showObstacles = !chkHideObstacles.checked && roomObstacles.length > 0;
-    const obstacleHeights = roomObstacles.map(g => {
-      const hs = g.points.map(p => p.height).filter(h => h != null);
-      return hs.length ? hs.reduce((a, b) => a + b, 0) / hs.length : Math.min(avgHeight, 1.2);
-    });
 
     const worldPts = [];
     floorOrdered.forEach((p, i) => {
       worldPts.push({ x: p.x, y: p.y, z: 0 });
       worldPts.push({ x: ceilingXY[i].x, y: ceilingXY[i].y, z: usedHeights[i] });
     });
-    if (showObstacles) {
-      roomObstacles.forEach((g, gi) => {
-        g.points.forEach(p => { worldPts.push({ x: p.x, y: p.y, z: 0 }); worldPts.push({ x: p.x, y: p.y, z: obstacleHeights[gi] }); });
-      });
-    }
     const pad = 40;
     const project = makeIsoProjector(worldPts, drawSize, pad, (W - drawSize) / 2, drawTop);
 
@@ -1707,8 +1794,7 @@ async function buildReportCanvas() {
       ctx.beginPath();
       pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
       ctx.closePath();
-      ctx.fillStyle = fill;
-      ctx.fill();
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
       ctx.strokeStyle = stroke;
       ctx.lineWidth = 1.5;
       ctx.stroke();
@@ -1730,23 +1816,8 @@ async function buildReportCanvas() {
       fillPoly(quad, wallFill, wallStroke);
     });
 
-    // ceiling
-    fillPoly(floorOrdered.map((p, i) => project(ceilingXY[i].x, ceilingXY[i].y, usedHeights[i])), ceilFill, ceilStroke);
-
-    // obstacles
-    if (showObstacles) {
-      roomObstacles.forEach((g, gi) => {
-        const gh = obstacleHeights[gi];
-        const gn = g.points.length;
-        if (gn >= 3) fillPoly(g.points.map(p => project(p.x, p.y, 0)), obstacleFill, obstacleStroke);
-        for (let i = 0; i < (gn >= 3 ? gn : gn - 1); i++) {
-          const a = g.points[i], b = g.points[(i + 1) % gn];
-          const quad = [project(a.x, a.y, 0), project(b.x, b.y, 0), project(b.x, b.y, gh), project(a.x, a.y, gh)];
-          fillPoly(quad, obstacleFill, obstacleStroke);
-        }
-        if (gn >= 3) fillPoly(g.points.map(p => project(p.x, p.y, gh)), obstacleFill, obstacleStroke);
-      });
-    }
+    // ceiling: outline only, no fill color
+    fillPoly(floorOrdered.map((p, i) => project(ceilingXY[i].x, ceilingXY[i].y, usedHeights[i])), null, ceilStroke);
 
     // labels: dynamic font size (fewer labels = bigger text, minimum enforced) + overlap avoidance
     const heightLabelCount = floorOrdered.filter(p => p.height != null).length;
@@ -1759,11 +1830,12 @@ async function buildReportCanvas() {
       const dist = Math.hypot(b.x - a.x, b.y - a.y);
       const pa = project(a.x, a.y, 0), pb = project(b.x, b.y, 0);
       const mid = { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 };
-      const matches = !edgeChangedByKey(a.label, b.label);
       drawLabel(ctx, mid.x, mid.y, '墙' + wallLetter(i) + ' ' + fmt(dist, 2) + 'm', fontPx, placedBoxes,
-        { color: matches ? EDGE_MATCH_COLOR : EDGE_MISMATCH_COLOR, bold: matches });
+        { color: WALL_LABEL_COLOR, bold: true });
     }
     floorOrdered.forEach((p, i) => {
+      const base = project(p.x, p.y, 0);
+      drawLabel(ctx, base.x, base.y + 10, String(p.num), fontPx, placedBoxes, { color: '#161616', bold: true });
       if (p.height == null) return;
       const top = project(ceilingXY[i].x, ceilingXY[i].y, usedHeights[i]);
       drawLabel(ctx, top.x, top.y - 6, 'H:' + fmt(p.height, 2) + 'm', fontPx, placedBoxes);
@@ -1789,8 +1861,8 @@ async function buildReportCanvas() {
   } else {
     wallInfo.forEach(w => {
       ctx.font = 'bold 14px sans-serif';
-      ctx.fillStyle = w.matches ? EDGE_MATCH_COLOR : EDGE_MISMATCH_COLOR;
-      ctx.fillText('墙' + w.letter + '  ' + w.aLabel + '↔' + w.bLabel, 40, y);
+      ctx.fillStyle = '#161616';
+      ctx.fillText('墙' + w.letter + ' Wall ' + w.letter + '  (' + w.aLabel + ' → ' + w.bLabel + ')', 40, y);
       y += 19;
       ctx.font = '13px sans-serif';
       ctx.fillStyle = '#333';

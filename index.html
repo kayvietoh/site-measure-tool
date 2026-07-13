@@ -91,6 +91,11 @@
       <label for="set-level-vibrate" style="margin:0;" data-i18n="settings.levelVibrate">水平仪震动提示 Level vibration</label>
     </div>
 
+    <div class="field-row" style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" id="set-sound" style="width:auto;" checked>
+      <label for="set-sound" style="margin:0;" data-i18n="settings.sound">声音提示 Sound</label>
+    </div>
+
     <button class="btn-secondary" id="btn-clear-data" data-i18n="settings.clearData">🗑️ 清除所有数据 Clear all data</button>
   </div>
 </div>
@@ -253,6 +258,7 @@
       <svg class="ar-overlay" id="ar-svg-room" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
       <button class="fab-undo" id="btn-undo-room" title="撤销 Undo">↺</button>
       <button class="fab-capture" id="btn-capture-room" title="添加地板角 Add corner">✛</button>
+      <button class="fab-height" id="btn-confirm-height-fab" title="确认顶部高度 Confirm top height" hidden>📏</button>
     </div>
 
     <div class="card" id="room-height-target-card" hidden>

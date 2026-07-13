@@ -32,6 +32,7 @@ const I18N = {
   'settings.language': { zh: '语言 Language', en: 'Language' },
   'settings.lightTheme': { zh: '浅色主题 Light theme', en: 'Light theme' },
   'settings.levelVibrate': { zh: '水平仪震动提示 Level vibration', en: 'Level vibration' },
+  'settings.sound': { zh: '声音提示 Sound', en: 'Sound' },
   'settings.clearData': { zh: '🗑️ 清除所有数据 Clear all data', en: '🗑️ Clear all data' }
 };
 
@@ -40,8 +41,26 @@ let appSettings = {
   defaultCamHeight: 1.2,
   defaultUnit: 'm',
   lightTheme: false,
-  levelVibrate: true
+  levelVibrate: true,
+  soundEnabled: true
 };
+
+let audioCtx = null;
+function playShutterSound() {
+  if (!appSettings.soundEnabled) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.15);
+  } catch (err) { /* audio unavailable, ignore */ }
+}
 
 function loadSettings() {
   try {
@@ -156,6 +175,10 @@ document.getElementById('set-level-vibrate').addEventListener('change', (e) => {
   appSettings.levelVibrate = e.target.checked;
   saveSettings();
 });
+document.getElementById('set-sound').addEventListener('change', (e) => {
+  appSettings.soundEnabled = e.target.checked;
+  saveSettings();
+});
 document.getElementById('btn-clear-data').addEventListener('click', () => {
   if (!confirm('确定要清除所有本地保存的数据吗？（房间测绘记录、设置等都会被清除）\nClear all locally saved data (room scans, settings, etc)?')) return;
   localStorage.clear();
@@ -170,6 +193,7 @@ function applySettingsToUI() {
   document.getElementById('set-default-unit').value = appSettings.defaultUnit;
   document.getElementById('set-light-theme').checked = appSettings.lightTheme;
   document.getElementById('set-level-vibrate').checked = appSettings.levelVibrate;
+  document.getElementById('set-sound').checked = appSettings.soundEnabled;
   prefillDefaultCamHeights();
 }
 
@@ -189,6 +213,12 @@ tabButtons.forEach(btn => {
     stopCamerasExcept(target);
     if (target === 'distance' && document.querySelector('.mode-btn[data-mode="angle"]').classList.contains('active')) {
       initAngleMode();
+    }
+    if (target === 'distance' && document.querySelector('.mode-btn[data-mode="ref"]').classList.contains('active')) {
+      initRefMode();
+    }
+    if (target === 'level' && typeof initLevelMode === 'function') {
+      initLevelMode();
     }
     if (target === 'room' && typeof initRoomMode === 'function') {
       initRoomMode();
@@ -335,7 +365,10 @@ function projectToScreen(tiltAtCapture, headingAtCapture) {
   if (tilt == null) return null;
   const deltaHeading = angleDiff(heading, headingAtCapture);
   const deltaTilt = tiltAtCapture - tilt;
-  let x = 50 + (deltaHeading / AR_HFOV) * 100;
+  // A point captured to the current-facing side must slide to the OPPOSITE
+  // screen side as the camera pans toward it (mirrors real-world parallax) —
+  // hence the minus sign here, not plus.
+  let x = 50 - (deltaHeading / AR_HFOV) * 100;
   let y = 50 - (deltaTilt / AR_VFOV) * 100;
   x = Math.max(4, Math.min(96, x));
   y = Math.max(4, Math.min(96, y));
@@ -360,6 +393,7 @@ modeButtons.forEach(btn => {
     const leaving = btn.dataset.mode === 'angle' ? 'video-ref' : 'video-angle';
     stopCamera(document.getElementById(leaving));
     if (btn.dataset.mode === 'angle') initAngleMode();
+    if (btn.dataset.mode === 'ref') initRefMode();
   });
 });
 
@@ -548,14 +582,20 @@ let frameCanvas = null; // offscreen canvas holding the frozen photo
 let refPoints = []; // up to 4 points {x,y}
 let frozen = false;
 
-btnStartCamRef.addEventListener('click', async () => {
+async function startRefCapture() {
   frozen = false;
   refPoints = [];
   frameCanvas = null;
   canvasRef.style.display = 'none';
   videoRef.style.display = 'block';
   await startCamera(videoRef);
-});
+}
+btnStartCamRef.addEventListener('click', startRefCapture);
+
+async function initRefMode() {
+  if (frozen || activeStreams[videoRef.id]) return; // already mid-capture, don't reset
+  await startRefCapture();
+}
 
 function drawCover(ctx, video, cw, ch) {
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -673,10 +713,11 @@ const levelReadout = document.getElementById('level-readout');
 const lineH = document.getElementById('line-h');
 const lineV = document.getElementById('line-v');
 
-btnStartCamLevel.addEventListener('click', async () => {
+async function initLevelMode() {
   await ensureMotionPermission();
   await startCamera(videoLevel);
-});
+}
+btnStartCamLevel.addEventListener('click', initLevelMode);
 
 btnSnapLevel.addEventListener('click', () => {
   if (!activeStreams[videoLevel.id]) {
@@ -714,6 +755,7 @@ btnSnapLevel.addEventListener('click', () => {
   ctx.fillText('roll: ' + fmt(roll, 1) + '°  pitch: ' + fmt(pitch, 1) + '°', 14, ch - 21);
 
   canvas.toBlob(blob => downloadBlob(blob, 'level-screenshot.jpg'), 'image/jpeg', 0.92);
+  playShutterSound();
 });
 
 function updateLevelReadout() {
@@ -854,6 +896,7 @@ const btnCaptureRoom = document.getElementById('btn-capture-room');
 const roomHeightTargetCard = document.getElementById('room-height-target-card');
 const roomHeightTargetLabel = document.getElementById('room-height-target-label');
 const btnConfirmHeight = document.getElementById('btn-confirm-height');
+const btnConfirmHeightFab = document.getElementById('btn-confirm-height-fab');
 const roomPointsListEl = document.getElementById('room-points-list');
 const btnResetRoom = document.getElementById('btn-reset-room');
 const roomPlanSvg = document.getElementById('room-plan-svg');
@@ -944,9 +987,10 @@ function requestHeightFor(target) {
   roomPendingHeightTarget = target;
   roomHeightTargetLabel.textContent = target.label;
   roomHeightTargetCard.hidden = false;
+  btnConfirmHeightFab.hidden = false;
 }
 
-btnConfirmHeight.addEventListener('click', () => {
+function confirmRoomHeight() {
   if (!roomPendingHeightTarget) return;
   const tilt = currentTiltFromHorizontal();
   const height = appSettings.defaultCamHeight;
@@ -959,10 +1003,13 @@ btnConfirmHeight.addEventListener('click', () => {
   base.height = height + base.d * Math.tan(toRad(tilt));
   roomPendingHeightTarget = null;
   roomHeightTargetCard.hidden = true;
+  btnConfirmHeightFab.hidden = true;
   renderRoomPointsList();
   renderRoomPlan();
   saveRoomState();
-});
+}
+btnConfirmHeight.addEventListener('click', confirmRoomHeight);
+btnConfirmHeightFab.addEventListener('click', confirmRoomHeight);
 
 function renderRoomPointsList() {
   if (roomFloorPoints.length === 0) {
@@ -1125,6 +1172,7 @@ function deleteRoomPoint(target) {
   if (roomPendingHeightTarget && roomPendingHeightTarget.pIndex === target.pIndex) {
     roomPendingHeightTarget = null;
     roomHeightTargetCard.hidden = true;
+    btnConfirmHeightFab.hidden = true;
   }
   renderRoomPointsList();
   renderRoomPlan();
@@ -1175,6 +1223,7 @@ btnResetRoom.addEventListener('click', () => {
   roomPointCounter = 0;
   roomPendingHeightTarget = null;
   roomHeightTargetCard.hidden = true;
+  btnConfirmHeightFab.hidden = true;
   roomRemarksInput.value = '';
   roomWallOverrides = {};
   roomPlanPage = 0;
@@ -1448,10 +1497,10 @@ function renderRoomPlan() {
     svgPoly(quad, selected ? SEL_FILL : DIM_FILL, selected ? SEL_STROKE : DIM_STROKE, selected ? 2.5 : 1.2);
   }
 
-  // ceiling: outline only, no fill color, ever (brighter outline when its page is selected)
+  // ceiling: highlighted like floor/walls when its page is selected (export stays outline-only, see buildReportCanvas)
   if (n >= 3) {
     const ceilingSelected = roomPlanPage === n + 1;
-    svgPoly(floorOrdered.map((p, i) => project(ceilingXY[i].x, ceilingXY[i].y, usedHeights[i])), 'none', ceilingSelected ? SEL_STROKE : 'rgba(255,255,255,0.35)', ceilingSelected ? 2.5 : 1.5);
+    svgPoly(floorOrdered.map((p, i) => project(ceilingXY[i].x, ceilingXY[i].y, usedHeights[i])), ceilingSelected ? SEL_FILL : 'none', ceilingSelected ? SEL_STROKE : 'rgba(255,255,255,0.35)', ceilingSelected ? 2.5 : 1.5);
   }
 
   // ground edges: the primary clickable/labelled measurements
@@ -1464,14 +1513,22 @@ function renderRoomPlan() {
     line.addEventListener('click', () => onEdgeClick(dist));
 
     const mid = { x: (sa.x + sb.x) / 2, y: (sa.y + sb.y) / 2 };
-    const label = document.createElementNS(ns, 'text');
-    label.setAttribute('x', mid.x); label.setAttribute('y', mid.y + 12);
-    label.setAttribute('text-anchor', 'middle');
-    label.setAttribute('class', 'plan-text');
-    label.style.fill = WALL_LABEL_COLOR;
-    label.style.fontWeight = 'bold';
-    label.textContent = '墙' + wallLetter(i) + ' ' + fmt(dist, 2) + 'm';
-    svg.appendChild(label);
+    const labelWall = document.createElementNS(ns, 'text');
+    labelWall.setAttribute('x', mid.x); labelWall.setAttribute('y', mid.y + 10);
+    labelWall.setAttribute('text-anchor', 'middle');
+    labelWall.setAttribute('class', 'plan-text');
+    labelWall.style.fill = WALL_LABEL_COLOR;
+    labelWall.style.fontWeight = 'bold';
+    labelWall.textContent = '墙' + wallLetter(i);
+    svg.appendChild(labelWall);
+    const labelDist = document.createElementNS(ns, 'text');
+    labelDist.setAttribute('x', mid.x); labelDist.setAttribute('y', mid.y + 24);
+    labelDist.setAttribute('text-anchor', 'middle');
+    labelDist.setAttribute('class', 'plan-text');
+    labelDist.style.fill = WALL_LABEL_COLOR;
+    labelDist.style.fontWeight = 'bold';
+    labelDist.textContent = fmt(dist, 2) + 'm';
+    svg.appendChild(labelDist);
   }
 
   floorOrdered.forEach((p, i) => {

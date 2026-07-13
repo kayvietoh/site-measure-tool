@@ -239,7 +239,7 @@ html, body {
 .overlay-readout {
   position: absolute;
   left: 8px;
-  bottom: 8px;
+  top: 8px;
   background: rgba(0,0,0,0.55);
   color: #fff;
   font-size: 13px;
@@ -259,7 +259,8 @@ html, body {
 .overlay-readout-height {
   left: auto;
   right: 8px;
-  bottom: 8px;
+  top: 8px;
+  bottom: auto;
 }
 
 .ar-overlay {
@@ -292,7 +293,7 @@ html, body {
   stroke-width: 1.4px;
 }
 
-.fab-capture, .fab-undo {
+.fab-capture, .fab-undo, .fab-height {
   position: absolute;
   bottom: 16px;
   border: none;
@@ -317,6 +318,16 @@ html, body {
   font-size: 18px;
   background: rgba(0,0,0,0.55);
   color: #fff;
+}
+.fab-height {
+  left: 50%;
+  transform: translateX(-50%);
+  width: 54px;
+  height: 54px;
+  font-size: 22px;
+  background: var(--accent-2, #33c17a);
+  color: #06210f;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
 }
 
 .plan-pager {

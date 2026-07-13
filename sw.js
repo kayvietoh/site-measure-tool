@@ -1,4 +1,4 @@
-const CACHE_NAME = 'site-measure-v11';
+const CACHE_NAME = 'site-measure-v13';
 const ASSETS = [
   './',
   './index.html',
@@ -8,6 +8,8 @@ const ASSETS = [
   './icon.svg',
   './icon-192.png',
   './icon-512.png',
+  './rainbow-icon-192.png',
+  './rainbow-icon-512.png',
   './logo-SRMSB-small.jpg'
 ];
 

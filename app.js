@@ -368,10 +368,13 @@ function projectToScreen(tiltAtCapture, headingAtCapture) {
   // A point captured to the current-facing side must slide to the OPPOSITE
   // screen side as the camera pans toward it (mirrors real-world parallax) —
   // hence the minus sign here, not plus.
-  let x = 50 - (deltaHeading / AR_HFOV) * 100;
-  let y = 50 - (deltaTilt / AR_VFOV) * 100;
-  x = Math.max(4, Math.min(96, x));
-  y = Math.max(4, Math.min(96, y));
+  // No clamping here: the camera-wrap container (and the SVG's own default
+  // overflow) already clips anything outside the visible frame. Clamping x/y
+  // independently used to snap far-off points onto the visible edge, which
+  // bent the connecting lines into the wrong shape instead of just letting
+  // them run off-screen like real AR parallax would.
+  const x = 50 - (deltaHeading / AR_HFOV) * 100;
+  const y = 50 - (deltaTilt / AR_VFOV) * 100;
   return { x, y };
 }
 
@@ -739,7 +742,7 @@ btnSnapLevel.addEventListener('click', () => {
   ctx.lineWidth = 2;
   ctx.save();
   ctx.translate(cw / 2, ch / 2);
-  ctx.rotate(toRad(-roll));
+  ctx.rotate(toRad(roll));
   ctx.beginPath();
   ctx.moveTo(-cw, 0); ctx.lineTo(cw, 0);
   ctx.moveTo(0, -ch); ctx.lineTo(0, ch);
@@ -769,7 +772,10 @@ function updateLevelReadout() {
   const pitch = toDeg(Math.atan2(-z, Math.sqrt(x * x + y * y)));
   levelReadout.textContent = '左右 roll: ' + fmt(roll, 1) + '°  |  前后 pitch: ' + fmt(pitch, 1) + '°';
 
-  const rot = -roll;
+  // Rotate the crosshair to compensate for the phone's tilt so it stays
+  // aligned with true horizontal/vertical; sign matches the reported
+  // direction on-device (do not reintroduce a "-roll" negation here).
+  const rot = roll;
   lineH.style.transform = `rotate(${rot}deg)`;
   lineV.style.transform = `rotate(${rot}deg)`;
   const level = Math.abs(roll) < 0.7;

@@ -45,23 +45,6 @@ let appSettings = {
   soundEnabled: true
 };
 
-let audioCtx = null;
-function playShutterSound() {
-  if (!appSettings.soundEnabled) return;
-  try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = 880;
-    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
-    osc.connect(gain).connect(audioCtx.destination);
-    osc.start();
-    osc.stop(audioCtx.currentTime + 0.15);
-  } catch (err) { /* audio unavailable, ignore */ }
-}
-
 function loadSettings() {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -710,8 +693,6 @@ function redrawRefCanvasBlank() {
 
 /* ===================== 水平仪 Level ===================== */
 const videoLevel = document.getElementById('video-level');
-const btnStartCamLevel = document.getElementById('btn-start-cam-level');
-const btnSnapLevel = document.getElementById('btn-snap-level');
 const levelReadout = document.getElementById('level-readout');
 const lineH = document.getElementById('line-h');
 const lineV = document.getElementById('line-v');
@@ -720,46 +701,6 @@ async function initLevelMode() {
   await ensureMotionPermission();
   await startCamera(videoLevel);
 }
-btnStartCamLevel.addEventListener('click', initLevelMode);
-
-btnSnapLevel.addEventListener('click', () => {
-  if (!activeStreams[videoLevel.id]) {
-    alert('请先开启相机 Please start the camera first');
-    return;
-  }
-  const wrap = document.getElementById('camwrap-level');
-  const rect = wrap.getBoundingClientRect();
-  const cw = Math.round(rect.width), ch = Math.round(rect.height);
-  const canvas = document.createElement('canvas');
-  canvas.width = cw; canvas.height = ch;
-  const ctx = canvas.getContext('2d');
-  drawCover(ctx, videoLevel, cw, ch);
-
-  const roll = currentAccel ? toDeg(Math.atan2(currentAccel.x, currentAccel.y)) : 0;
-  const pitch = currentAccel ? toDeg(Math.atan2(-currentAccel.z, Math.sqrt(currentAccel.x ** 2 + currentAccel.y ** 2))) : 0;
-  const level = Math.abs(roll) < 0.7;
-  ctx.strokeStyle = level ? '#33c17a' : '#e14b4b';
-  ctx.lineWidth = 2;
-  ctx.save();
-  ctx.translate(cw / 2, ch / 2);
-  ctx.rotate(toRad(roll));
-  ctx.beginPath();
-  ctx.moveTo(-cw, 0); ctx.lineTo(cw, 0);
-  ctx.moveTo(0, -ch); ctx.lineTo(0, ch);
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.font = '600 15px sans-serif';
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(8, ch - 34, 230, 26);
-  ctx.fillStyle = '#fff';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('roll: ' + fmt(roll, 1) + '°  pitch: ' + fmt(pitch, 1) + '°', 14, ch - 21);
-
-  canvas.toBlob(blob => downloadBlob(blob, 'level-screenshot.jpg'), 'image/jpeg', 0.92);
-  playShutterSound();
-});
 
 function updateLevelReadout() {
   if (!currentAccel) return;
